@@ -10,6 +10,7 @@ mod util;
 mod api;
 mod storage;
 
+use reqwest::Client;
 use tauri::Manager;
 use buy::TicketInfo;
 use storage::{Account, HistoryItem, ProjectConfig};
@@ -23,6 +24,7 @@ use uuid::Uuid;
 
 struct AppState {
     tasks: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    http_client: Client,
 }
 
 fn get_app_dir(app_handle: &tauri::AppHandle) -> PathBuf {
@@ -57,9 +59,9 @@ fn get_accounts(app_handle: tauri::AppHandle) -> Result<Vec<Account>, String> {
 }
 
 #[tauri::command]
-async fn add_account(app_handle: tauri::AppHandle, cookies: Vec<String>) -> Result<Account, String> {
+async fn add_account(state: tauri::State<'_, AppState>, app_handle: tauri::AppHandle, cookies: Vec<String>) -> Result<Account, String> {
     // Fetch user info to get uid, name, face
-    let res = api::fetch_user_info(cookies.clone()).await.map_err(|e| e.to_string())?;
+    let res = api::fetch_user_info(&state.http_client, cookies.clone()).await.map_err(|e| e.to_string())?;
     
     if res["code"].as_i64().unwrap_or(-1) != 0 {
         return Err("Invalid cookies".to_string());
@@ -142,41 +144,41 @@ fn remove_project_history(app_handle: tauri::AppHandle, project_id: String, sku_
 }
 
 #[tauri::command]
-async fn get_user_info(cookies: Vec<String>) -> Result<serde_json::Value, String> {
-    api::fetch_user_info(cookies).await.map_err(|e| e.to_string())
+async fn get_user_info(state: tauri::State<'_, AppState>, cookies: Vec<String>) -> Result<serde_json::Value, String> {
+    api::fetch_user_info(&state.http_client, cookies).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn get_login_qrcode() -> Result<(String, String), String> {
-    auth::generate_qrcode().await.map_err(|e| e.to_string())
+async fn get_login_qrcode(state: tauri::State<'_, AppState>) -> Result<(String, String), String> {
+    auth::generate_qrcode(&state.http_client).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn poll_login_status(qrcode_key: String) -> Result<String, String> {
-    auth::poll_login(&qrcode_key).await.map_err(|e| e.to_string())
+async fn poll_login_status(state: tauri::State<'_, AppState>, qrcode_key: String) -> Result<String, String> {
+    auth::poll_login(&state.http_client, &qrcode_key).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn fetch_project(id: String) -> Result<serde_json::Value, String> {
-    api::fetch_project_info(id).await.map_err(|e| e.to_string())
+async fn fetch_project(state: tauri::State<'_, AppState>, id: String) -> Result<serde_json::Value, String> {
+    api::fetch_project_info(&state.http_client, id).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn fetch_buyer_list(project_id: String, cookies: Vec<String>) -> Result<serde_json::Value, String> {
-    api::fetch_buyers(project_id, cookies).await.map_err(|e| e.to_string())
+async fn fetch_buyer_list(state: tauri::State<'_, AppState>, project_id: String, cookies: Vec<String>) -> Result<serde_json::Value, String> {
+    api::fetch_buyers(&state.http_client, project_id, cookies).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn fetch_address_list(cookies: Vec<String>) -> Result<serde_json::Value, String> {
-    api::fetch_address_list(cookies).await.map_err(|e| e.to_string())
+async fn fetch_address_list(state: tauri::State<'_, AppState>, cookies: Vec<String>) -> Result<serde_json::Value, String> {
+    api::fetch_address_list(&state.http_client, cookies).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn sync_time(server_url: Option<String>) -> Result<serde_json::Value, String> {
+async fn sync_time(state: tauri::State<'_, AppState>, server_url: Option<String>) -> Result<serde_json::Value, String> {
     let url = server_url.unwrap_or_else(|| "https://api.bilibili.com/x/report/click/now".to_string());
 
     let server_time = if url.starts_with("http") {
-        api::get_server_time(Some(url)).await.map_err(|e| e.to_string())?
+        api::get_server_time(&state.http_client, Some(url)).await.map_err(|e| e.to_string())?
     } else {
         // Wrap blocking NTP call in spawn_blocking to avoid blocking the async runtime
         let ntp_url = url.clone();
@@ -363,7 +365,7 @@ fn export_cookie(app_handle: tauri::AppHandle, uid: String, path: String) -> Res
 }
 
 #[tauri::command]
-async fn import_cookie(app_handle: tauri::AppHandle, path: String) -> Result<(), String> {
+async fn import_cookie(state: tauri::State<'_, AppState>, app_handle: tauri::AppHandle, path: String) -> Result<(), String> {
     let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
     let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
 
@@ -382,7 +384,7 @@ async fn import_cookie(app_handle: tauri::AppHandle, path: String) -> Result<(),
         return Err("No cookies found in file".to_string());
     }
 
-    add_account(app_handle, cookies).await.map(|_| ())
+    add_account(state, app_handle, cookies).await.map(|_| ())
 }
 
 #[tauri::command]
@@ -397,6 +399,7 @@ fn main() {
     tauri::Builder::default()
         .manage(AppState {
             tasks: Arc::new(Mutex::new(HashMap::new())),
+            http_client: api::build_shared_client().expect("failed to build shared HTTP client"),
         })
         .invoke_handler(tauri::generate_handler![
             greet, 

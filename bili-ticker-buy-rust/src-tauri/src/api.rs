@@ -5,8 +5,15 @@ use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use std::net::UdpSocket;
 use sntpc;
 
-pub async fn fetch_project_info(id: String) -> Result<Value> {
-    let client = Client::new();
+pub fn build_shared_client() -> Result<Client> {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .tcp_keepalive(Duration::from_secs(60))
+        .build()
+        .map_err(|e| anyhow!("Failed to build shared HTTP client: {}", e))
+}
+
+pub async fn fetch_project_info(client: &Client, id: String) -> Result<Value> {
     let url = format!("https://show.bilibili.com/api/ticket/project/getV2?version=134&id={}&project_id={}", id, id);
     
     let mut res: Value = client.get(&url)
@@ -50,7 +57,7 @@ pub async fn fetch_project_info(id: String) -> Result<Value> {
                                  if let Ok(detail_resp) = client_clone.get(&detail_url)
                                     .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
                                     .send()
-                                    .await 
+                                    .await
                                  {
                                     if let Ok(detail_res) = detail_resp.json::<Value>().await {
                                         return Some((detail_res, link_id));
@@ -112,8 +119,7 @@ pub async fn fetch_project_info(id: String) -> Result<Value> {
     Ok(res)
 }
 
-pub async fn fetch_buyers(project_id: String, cookies: Vec<String>) -> Result<Value> {
-    let client = Client::new();
+pub async fn fetch_buyers(client: &Client, project_id: String, cookies: Vec<String>) -> Result<Value> {
     let url = format!("https://show.bilibili.com/api/ticket/buyer/list?is_default&projectId={}", project_id);
     
     let mut req = client.get(&url)
@@ -127,8 +133,7 @@ pub async fn fetch_buyers(project_id: String, cookies: Vec<String>) -> Result<Va
     Ok(res)
 }
 
-pub async fn fetch_user_info(cookies: Vec<String>) -> Result<Value> {
-    let client = Client::new();
+pub async fn fetch_user_info(client: &Client, cookies: Vec<String>) -> Result<Value> {
     let url = "https://api.bilibili.com/x/web-interface/nav";
     
     let mut req = client.get(url)
@@ -141,8 +146,7 @@ pub async fn fetch_user_info(cookies: Vec<String>) -> Result<Value> {
     Ok(res)
 }
 
-pub async fn fetch_address_list(cookies: Vec<String>) -> Result<Value> {
-    let client = Client::new();
+pub async fn fetch_address_list(client: &Client, cookies: Vec<String>) -> Result<Value> {
     let url = "https://show.bilibili.com/api/ticket/addr/list";
     
     let mut req = client.get(url)
@@ -155,17 +159,13 @@ pub async fn fetch_address_list(cookies: Vec<String>) -> Result<Value> {
     Ok(res)
 }
 
-pub async fn get_server_time(url_opt: Option<String>) -> Result<i64> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(3))
-        .build()
-        .map_err(|e| anyhow!("Failed to build client: {}", e))?;
-
+pub async fn get_server_time(client: &Client, url_opt: Option<String>) -> Result<i64> {
     // Default to Bilibili if no URL provided
     let url = url_opt.unwrap_or_else(|| "https://api.bilibili.com/x/report/click/now".to_string());
     
     let res: Value = client.get(&url)
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+        .timeout(Duration::from_secs(3))
         .send()
         .await?
         .json()

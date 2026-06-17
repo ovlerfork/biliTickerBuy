@@ -2,7 +2,7 @@ use tauri::Window;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use reqwest::{Client, Url};
+use reqwest::{Client, Proxy, Url};
 use reqwest::cookie::Jar;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -91,9 +91,43 @@ pub async fn start_buy_task(
     proxy: Option<String>,
     time_offset: Option<f64>,
     ntp_server: Option<String>,
-    base_dir: std::path::PathBuf
+    base_dir: std::path::PathBuf,
 ) -> Result<()> {
     emit_log(&window, &task_id, "Starting buy task...");
+
+    if let Some(p) = &proxy {
+        emit_log(&window, &task_id, &format!("Using proxy: {}", p));
+    }
+    if let Some(to) = time_offset {
+        emit_log(&window, &task_id, &format!("Time offset: {}ms", to));
+    }
+
+    let jar = Arc::new(Jar::default());
+    let url = "https://show.bilibili.com".parse::<Url>().unwrap();
+    
+    // Parse cookies
+    for cookie_str in &info.cookies {
+        for part in cookie_str.split(';') {
+             jar.add_cookie_str(part.trim(), &url);
+        }
+    }
+
+    let mut client_builder = Client::builder()
+        .cookie_provider(jar)
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0")
+        .connect_timeout(Duration::from_secs(3))
+        .tcp_keepalive(Duration::from_secs(60))
+        .timeout(Duration::from_secs(10))
+        .http2_keep_alive_interval(Duration::from_secs(30))
+        .http2_keep_alive_timeout(Duration::from_secs(10));
+
+    if let Some(proxy_url) = proxy.as_ref().map(|p| p.trim()).filter(|p| !p.is_empty()) {
+        let proxy = Proxy::all(proxy_url)
+            .map_err(|e| anyhow::anyhow!("Invalid proxy '{}': {}", proxy_url, e))?;
+        client_builder = client_builder.proxy(proxy);
+    }
+
+    let client = client_builder.build()?;
     
     if let Some(ts) = &time_start {
         emit_log(&window, &task_id, &format!("Scheduled start time: {}", ts));
@@ -116,6 +150,7 @@ pub async fn start_buy_task(
             let ntp_server_clone = ntp_server.clone();
             let task_id_clone = task_id.clone();
             let window_clone = window.clone(); // Tauri windows are cheap to clone (handle)
+            let time_client_clone = client.clone();
 
             // Spawn background sync task
             tokio::spawn(async move {
@@ -127,7 +162,7 @@ pub async fn start_buy_task(
                     let url = ntp_server_clone.clone().unwrap_or_else(|| "https://api.bilibili.com/x/report/click/now".to_string());
                     let ntp_url = url.clone();
                     let sync_result = if url.starts_with("http") {
-                        api::get_server_time(Some(url.clone())).await
+                        api::get_server_time(&time_client_clone, Some(url.clone())).await
                     } else {
                         // Wrap blocking NTP call in spawn_blocking to avoid blocking the async runtime
                         let ntp_url_owned = ntp_url.clone();
@@ -187,29 +222,6 @@ pub async fn start_buy_task(
              emit_log(&window, &task_id, "Invalid time format. Starting immediately.");
         }
     }
-
-    if let Some(p) = &proxy {
-        emit_log(&window, &task_id, &format!("Using proxy: {}", p));
-    }
-    if let Some(to) = time_offset {
-        emit_log(&window, &task_id, &format!("Time offset: {}ms", to));
-    }
-
-    let jar = Arc::new(Jar::default());
-    let url = "https://show.bilibili.com".parse::<Url>().unwrap();
-    
-    // Parse cookies
-    for cookie_str in &info.cookies {
-        for part in cookie_str.split(';') {
-             jar.add_cookie_str(part.trim(), &url);
-        }
-    }
-
-    let client = Client::builder()
-        .cookie_provider(jar)
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0")
-        .timeout(Duration::from_secs(10))
-        .build()?;
 
     let is_hot = info.is_hot_project.unwrap_or(false);
     let mut ctoken_gen = CTokenGenerator::new(

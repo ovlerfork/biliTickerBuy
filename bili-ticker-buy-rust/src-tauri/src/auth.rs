@@ -3,8 +3,7 @@ use serde_json::Value;
 use std::time::Duration;
 use anyhow::{Result, anyhow};
 
-pub async fn generate_qrcode() -> Result<(String, String)> {
-    let client = Client::new();
+pub async fn generate_qrcode(client: &Client) -> Result<(String, String)> {
     let url = "https://passport.bilibili.com/x/passport-login/web/qrcode/generate";
     let res: Value = client.get(url)
         .header("User-Agent", "Mozilla/5.0")
@@ -22,8 +21,7 @@ pub async fn generate_qrcode() -> Result<(String, String)> {
     }
 }
 
-pub async fn poll_login(qrcode_key: &str) -> Result<String> {
-    let client = Client::new();
+pub async fn poll_login(client: &Client, qrcode_key: &str) -> Result<String> {
     let url = "https://passport.bilibili.com/x/passport-login/web/qrcode/poll";
 
     for _ in 0..120 {
