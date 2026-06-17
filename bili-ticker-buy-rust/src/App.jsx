@@ -1040,7 +1040,7 @@ function App() {
             buyer_info: sanitizedBuyers,
             deliver_info: topDeliverInfo,
             cookies: typeof cookies === 'string' ? JSON.parse(cookies) : cookies,
-            is_hot_project: false,
+            is_hot_project: Boolean(projectInfo.hotProject ?? projectInfo.hot_project),
             pay_money: selectedSku.price,
             contact_name: topName,
             contact_tel: topTel

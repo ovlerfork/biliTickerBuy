@@ -224,8 +224,12 @@ pub async fn start_buy_task(
         "order_type": 1,
         "project_id": info.project_id,
         "sku_id": info.sku_id,
+        "buyer_info": info.buyer_info.clone(),
+        "ignoreRequestLimit": true,
+        "ticket_agent": "",
         "token": "",
         "newRisk": true,
+        "requestSource": "neul-next",
     });
 
     let mut left_time = total_attempts as i32;
@@ -244,9 +248,12 @@ pub async fn start_buy_task(
         
         if is_hot {
             token_payload["token"] = json!(ctoken_gen.generate_ctoken(false));
+        } else {
+            token_payload["token"] = json!("");
         }
 
         let prepare_url = format!("https://show.bilibili.com/api/ticket/order/prepare?project_id={}", info.project_id);
+        let prepare_started_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64;
         let res = client.post(&prepare_url)
             .json(&token_payload)
             .send()
@@ -256,20 +263,32 @@ pub async fn start_buy_task(
         emit_log(&window, &task_id, &format!("Prepare result: {:?}", res_json));
 
         if res_json["errno"].as_i64().unwrap_or(-1) != 0 && res_json["code"].as_i64().unwrap_or(-1) != 0 {
-             emit_log(&window, &task_id, &format!("Prepare failed: {:?}", res_json));
-             sleep(Duration::from_millis(interval)).await;
-             continue;
+            emit_log(&window, &task_id, &format!("Prepare failed: {:?}", res_json));
+            sleep(Duration::from_millis(interval)).await;
+            if mode == 1 {
+                left_time -= 1;
+                if left_time <= 0 {
+                    is_running = false;
+                    emit_log(&window, &task_id, "Total attempts reached. Stopping.");
+                    if let Err(e) = window.emit("task_result", TaskResultPayload {
+                        task_id: task_id.clone(),
+                        success: false,
+                        message: "达到最大尝试次数，任务停止".to_string()
+                    }) {
+                        emit_log(&window, &task_id, &format!("Warning: Failed to emit task result: {}", e));
+                    }
+                }
+            }
+            continue;
         }
 
         let token = res_json["data"]["token"].as_str().unwrap_or("").to_string();
-        let ptoken = res_json["data"]["ptoken"].as_str().unwrap_or("").to_string();
+        let ptoken = res_json["data"]["ptoken"].as_str().unwrap_or("").replace('=', "");
         
         emit_log(&window, &task_id, "2) Creating order...");
         
         // Prepare create payload
         let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64;
-        let click_origin = now_ms - rand::random::<u64>() % 2000 - 1000; // 1-3 seconds ago
-
         let mut create_payload = json!({
             "project_id": info.project_id,
             "screen_id": info.screen_id,
@@ -283,13 +302,7 @@ pub async fn start_buy_task(
             "timestamp": now_ms,
             "deviceId": device_id,
             "requestSource": "neul-next",
-            "newRisk": true,
-            "clickPosition": {
-                "x": rand::random::<u64>() % 500 + 100,
-                "y": rand::random::<u64>() % 1000 + 500,
-                "origin": click_origin,
-                "now": now_ms
-            }
+            "newRisk": true
         });
 
         if let Some(pay_money) = info.pay_money {
@@ -328,9 +341,16 @@ pub async fn start_buy_task(
             let mut create_url = format!("https://show.bilibili.com/api/ticket/order/createV2?project_id={}", info.project_id);
             
             if is_hot {
+                let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64;
                 create_payload["ctoken"] = json!(ctoken_gen.generate_ctoken(true));
                 create_payload["ptoken"] = json!(ptoken);
                 create_payload["orderCreateUrl"] = json!("https://show.bilibili.com/api/ticket/order/createV2");
+                create_payload["clickPosition"] = json!({
+                    "x": rand::random::<u64>() % 501 + 400,
+                    "y": rand::random::<u64>() % 501 + 400,
+                    "origin": prepare_started_ms,
+                    "now": now_ms
+                });
                 create_url.push_str(&format!("&ptoken={}", ptoken));
             }
 
@@ -348,60 +368,66 @@ pub async fn start_buy_task(
                     emit_log(&window, &task_id, &format!("[Attempt {}/{}] Code: {} ({}) | Msg: {}", attempt, max_attempts, errno, get_error_message(errno), r_json["msg"]));
 
                     if errno == 0 || errno == 100048 || errno == 100079 {
-                        emit_log(&window, &task_id, "Order created successfully!");
                         success = true;
-                        
-                        if errno == 0 {
-                             let order_id = if let Some(s) = r_json["data"]["orderId"].as_str() {
-                                 s.to_string()
-                             } else if let Some(n) = r_json["data"]["orderId"].as_i64() {
-                                 n.to_string()
-                             } else {
-                                 "".to_string()
-                             };
+                        let order_id = if let Some(s) = r_json["data"]["orderId"].as_str() {
+                            s.to_string()
+                        } else if let Some(n) = r_json["data"]["orderId"].as_i64() {
+                            n.to_string()
+                        } else {
+                            "".to_string()
+                        };
 
-                             emit_log(&window, &task_id, &format!("Order ID: {}", order_id));
-                             
-                             if !order_id.is_empty() {
-                                 let mut pay_url_str = "".to_string();
-                                 let pay_url_api = format!("https://show.bilibili.com/api/ticket/order/getPayParam?order_id={}", order_id);
-                                 
-                                 if let Ok(pay_res) = client.get(&pay_url_api).send().await {
-                                     if let Ok(pay_json) = pay_res.json::<serde_json::Value>().await {
-                                         if let Some(code_url) = pay_json["data"]["code_url"].as_str() {
-                                             pay_url_str = code_url.to_string();
-                                             if let Err(e) = window.emit("payment_qrcode", PaymentPayload {
-                                                 task_id: task_id.clone(),
-                                                 url: code_url.to_string()
-                                             }) {
-                                                 emit_log(&window, &task_id, &format!("Warning: Failed to emit payment event: {}", e));
-                                             }
-                                         } else {
-                                             emit_log(&window, &task_id, &format!("Failed to get payment URL: {:?}", pay_json));
-                                         }
-                                     }
-                                 }
+                        if order_id.is_empty() {
+                            emit_log(&window, &task_id, &format!("Existing order state reached without order id: {:?}", r_json));
+                            if let Err(e) = window.emit("task_result", TaskResultPayload {
+                                task_id: task_id.clone(),
+                                success: true,
+                                message: format!("已有订单，停止重试: {}", r_json["msg"])
+                            }) {
+                                emit_log(&window, &task_id, &format!("Warning: Failed to emit task result: {}", e));
+                            }
+                            break;
+                        }
 
-                                 // Save to history regardless of payment URL
-                                 let history_item = HistoryItem {
-                                     order_id: order_id.to_string(),
-                                     project_name: info.project_name.clone().unwrap_or(info.project_id.clone()),
-                                     price: info.pay_money.unwrap_or(0),
-                                     time: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-                                     pay_url: pay_url_str,
-                                 };
-                                 if let Err(e) = storage::add_history_item(&base_dir, history_item) {
-                                     emit_log(&window, &task_id, &format!("Warning: Failed to save history: {}", e));
-                                 }
-                             } else {
-                                 emit_log(&window, &task_id, &format!("Failed to extract Order ID from: {:?}", r_json));
-                             }
+                        emit_log(&window, &task_id, "Order created successfully!");
+
+                        emit_log(&window, &task_id, &format!("Order ID: {}", order_id));
+
+                        let mut pay_url_str = "".to_string();
+                        let pay_url_api = format!("https://show.bilibili.com/api/ticket/order/getPayParam?order_id={}", order_id);
+
+                        if let Ok(pay_res) = client.get(&pay_url_api).send().await {
+                            if let Ok(pay_json) = pay_res.json::<serde_json::Value>().await {
+                                if let Some(code_url) = pay_json["data"]["code_url"].as_str() {
+                                    pay_url_str = code_url.to_string();
+                                    if let Err(e) = window.emit("payment_qrcode", PaymentPayload {
+                                        task_id: task_id.clone(),
+                                        url: code_url.to_string()
+                                    }) {
+                                        emit_log(&window, &task_id, &format!("Warning: Failed to emit payment event: {}", e));
+                                    }
+                                } else {
+                                    emit_log(&window, &task_id, &format!("Failed to get payment URL: {:?}", pay_json));
+                                }
+                            }
+                        }
+
+                        // Save to history regardless of payment URL
+                        let history_item = HistoryItem {
+                            order_id: order_id.to_string(),
+                            project_name: info.project_name.clone().unwrap_or(info.project_id.clone()),
+                            price: info.pay_money.unwrap_or(0),
+                            time: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                            pay_url: pay_url_str,
+                        };
+                        if let Err(e) = storage::add_history_item(&base_dir, history_item) {
+                            emit_log(&window, &task_id, &format!("Warning: Failed to save history: {}", e));
                         }
                         
                         if let Err(e) = window.emit("task_result", TaskResultPayload {
                             task_id: task_id.clone(),
                             success: true,
-                            message: format!("抢票成功！订单号: {}", r_json["data"]["orderId"])
+                            message: format!("抢票成功！订单号: {}", order_id)
                         }) {
                             emit_log(&window, &task_id, &format!("Warning: Failed to emit task result: {}", e));
                         }

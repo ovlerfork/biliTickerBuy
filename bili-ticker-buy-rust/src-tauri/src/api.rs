@@ -1,20 +1,171 @@
 use reqwest::Client;
-use serde_json::Value;
+use serde_json::{json, Value};
 use anyhow::{Result, anyhow};
 use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use std::net::UdpSocket;
 use sntpc;
 
-pub async fn fetch_project_info(id: String) -> Result<Value> {
-    let client = Client::new();
-    let url = format!("https://show.bilibili.com/api/ticket/project/getV2?version=134&id={}&project_id={}", id, id);
-    
-    let mut res: Value = client.get(&url)
+async fn fetch_new_project_info(client: &Client, id: &str) -> Result<Value> {
+    let items_id = id
+        .parse::<u64>()
+        .map(|n| json!(n))
+        .unwrap_or_else(|_| json!(id));
+    let mut res: Value = client.post("https://mall.bilibili.com/mall-search-items/items_detail/info")
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+        .header("Origin", "https://mall.bilibili.com")
+        .header("Referer", format!("https://mall.bilibili.com/neul-next/ticket-renovation/detail.html?id={}&from=pc_ticketlist&noTitleBar=1", id))
+        .json(&json!({
+            "itemsId": items_id,
+            "itemsDetailPageType": 3
+        }))
         .send()
         .await?
         .json()
         .await?;
+
+    if res["success"].as_bool() == Some(false) {
+        return Err(anyhow!("new project detail API returned success=false"));
+    }
+    if let Some(errno) = res["errno"].as_i64().or_else(|| res["code"].as_i64()) {
+        if errno != 0 {
+            return Err(anyhow!("new project detail API returned {}", errno));
+        }
+    }
+
+    normalize_project_data(&mut res, id);
+    if res["data"]["screen_list"]
+        .as_array()
+        .map(|list| !list.is_empty())
+        .unwrap_or(false)
+    {
+        if let Some(root) = res.as_object_mut() {
+            root.entry("code".to_string()).or_insert(json!(0));
+            root.entry("errno".to_string()).or_insert(json!(0));
+        }
+        Ok(res)
+    } else {
+        Err(anyhow!(
+            "new project detail API returned no usable screen_list"
+        ))
+    }
+}
+
+fn normalize_project_data(res: &mut Value, id: &str) {
+    let Some(data) = res.get_mut("data").and_then(|v| v.as_object_mut()) else {
+        return;
+    };
+
+    let project_id = data
+        .get("id")
+        .or_else(|| data.get("projectId"))
+        .or_else(|| data.get("itemsId"))
+        .cloned()
+        .unwrap_or_else(|| json!(id));
+    data.insert("id".to_string(), project_id.clone());
+    data.entry("project_id".to_string()).or_insert(project_id);
+
+    if !data.contains_key("name") {
+        if let Some(name) = data.get("projectName").cloned() {
+            data.insert("name".to_string(), name);
+        }
+    }
+
+    let hot_project = data
+        .get("hotProject")
+        .or_else(|| data.get("hot_project"))
+        .and_then(|v| {
+            v.as_bool()
+                .or_else(|| v.as_i64().map(|n| n != 0))
+                .or_else(|| v.as_str().map(|s| s == "true" || s == "1"))
+        })
+        .unwrap_or(false);
+    data.insert("hotProject".to_string(), json!(hot_project));
+    data.insert("hot_project".to_string(), json!(hot_project));
+
+    let screens = data
+        .get("screen_list")
+        .or_else(|| data.get("screenList"))
+        .cloned();
+    if data.get("screen_list").and_then(|v| v.as_array()).is_none() {
+        if let Some(screens) = screens.clone() {
+            data.insert("screen_list".to_string(), screens);
+        }
+    }
+    if !data.contains_key("screenList") {
+        if let Some(screens) = screens.clone() {
+            data.insert("screenList".to_string(), screens);
+        }
+    }
+
+    if !data.contains_key("venue_info") {
+        if let Some(venue_info) = data.get("skuVenueInfo").cloned() {
+            data.insert("venue_info".to_string(), venue_info);
+        }
+    }
+    if !data.contains_key("sales_dates") {
+        if let Some(sales_dates) = data.get("salesDates").cloned() {
+            data.insert("sales_dates".to_string(), sales_dates);
+        }
+    }
+
+    let screen_list = data
+        .get("screen_list")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if !data.contains_key("has_eticket") {
+        let has_eticket = !screen_list.iter().any(|screen| {
+            screen
+                .get("express_fee")
+                .and_then(|v| {
+                    v.as_i64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                })
+                .unwrap_or(0)
+                > 0
+        });
+        data.insert("has_eticket".to_string(), json!(has_eticket));
+    }
+
+    let start_times: Vec<i64> = screen_list
+        .iter()
+        .filter_map(|screen| {
+            screen.get("start_time").and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            })
+        })
+        .collect();
+    if !data.contains_key("start_time") {
+        if let Some(start_time) = start_times.iter().min() {
+            data.insert("start_time".to_string(), json!(start_time));
+        }
+    }
+    if !data.contains_key("end_time") {
+        if let Some(end_time) = data.get("endTime").cloned() {
+            data.insert("end_time".to_string(), end_time);
+        } else if let Some(end_time) = start_times.iter().max() {
+            data.insert("end_time".to_string(), json!(end_time));
+        }
+    }
+}
+
+pub async fn fetch_project_info(id: String) -> Result<Value> {
+    let client = Client::new();
+    let mut res = match fetch_new_project_info(&client, &id).await {
+        Ok(res) => res,
+        Err(_) => {
+            let url = format!("https://show.bilibili.com/api/ticket/project/getV2?version=134&id={}&project_id={}", id, id);
+            client.get(&url)
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+                .send()
+                .await?
+                .json()
+                .await?
+        }
+    };
+
+    normalize_project_data(&mut res, &id);
 
     // Check for linked goods (场贩/周边)
     let link_url = format!("https://show.bilibili.com/api/ticket/linkgoods/list?project_id={}&page_type=0", id);
@@ -50,7 +201,7 @@ pub async fn fetch_project_info(id: String) -> Result<Value> {
                                  if let Ok(detail_resp) = client_clone.get(&detail_url)
                                     .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
                                     .send()
-                                    .await 
+                                    .await
                                  {
                                     if let Ok(detail_res) = detail_resp.json::<Value>().await {
                                         return Some((detail_res, link_id));
