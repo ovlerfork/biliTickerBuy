@@ -1860,7 +1860,7 @@ function App() {
 
                                         {/* Logs Preview */}
                                         <div className={`bg-black font-mono text-xs overflow-y-auto custom-scrollbar ${viewMode === "grid" ? "flex-1 p-2" : "rounded-lg p-3 h-32 bg-black/50"}`}>
-                                            {(viewMode === "grid" ? (task.logs || []).slice(-TASK_LOG_RENDER_LIMIT) : (task.logs || []).slice(-10)).map((log, i) => (
+                                            {(viewMode === "grid" ? (task.logs || []).slice(-TASK_LOG_RENDER_LIMIT).reverse() : (task.logs || []).slice(-10)).map((log, i) => (
                                                 <div key={i} className="text-gray-300 break-all border-b border-gray-800/50 last:border-0 py-0.5">
                                                     <span className="text-gray-600 mr-1">[{log.time}]</span>
                                                     {log.message}
