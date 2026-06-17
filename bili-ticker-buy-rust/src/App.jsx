@@ -1367,6 +1367,7 @@ function App() {
 
     const globalVisibleLogs = logs.slice(-visibleGlobalLogLines);
     const hiddenGlobalLogCount = Math.max(0, logs.length - globalVisibleLogs.length);
+    const globalLogStartIndex = logs.length - globalVisibleLogs.length;
 
     function handleSaveSettings() {
         const settings = {
@@ -1657,7 +1658,7 @@ function App() {
                                         </button>
                                     )}
                                     {globalVisibleLogs.map((log, i) => (
-                                        <div key={i} className="text-green-400 break-all">
+                                        <div key={globalLogStartIndex + i} className="text-green-400 break-all">
                                             {logTime(log) && <span className="text-gray-600 mr-2">[{logTime(log)}]</span>}
                                             {logMessage(log)}
                                         </div>
@@ -1706,7 +1707,7 @@ function App() {
                                             </div>
                                         </button>
                                     </div>
-                                    <button onClick={() => setTasks([])} className="text-sm text-gray-500 hover:text-white">
+                                    <button onClick={() => { setTasks([]); setVisibleTaskLogLines({}); }} className="text-sm text-gray-500 hover:text-white">
                                         清空已完成任务
                                     </button>
                                 </div>
@@ -1724,6 +1725,7 @@ function App() {
                                     const taskVisibleLineCount = visibleTaskLogLines[task.id] || defaultTaskLogLines;
                                     const taskVisibleLogs = taskLogs.slice(-taskVisibleLineCount);
                                     const hiddenTaskLogCount = Math.max(0, taskLogs.length - taskVisibleLogs.length);
+                                    const taskLogStartIndex = taskLogs.length - taskVisibleLogs.length;
 
                                     return (
                                     <div key={task.id} className={`bg-gray-800 rounded-xl border shadow-lg flex flex-col transition-all duration-300 hover:border-gray-600 hover:shadow-xl ${task.status === 'running' ? 'border-green-500/40 shadow-green-500/5' : 'border-gray-700'} ${viewMode === "grid" ? "h-[500px]" : "p-6"}`}>
@@ -1780,7 +1782,14 @@ function App() {
                                                     </button>
                                                 )}
                                                 <button
-                                                    onClick={() => setTasks(prev => prev.filter(t => t.id !== task.id))}
+                                                    onClick={() => {
+                                                        setTasks(prev => prev.filter(t => t.id !== task.id));
+                                                        setVisibleTaskLogLines(prev => {
+                                                            const next = { ...prev };
+                                                            delete next[task.id];
+                                                            return next;
+                                                        });
+                                                    }}
                                                     className="p-1.5 text-gray-500 hover:text-red-400"
                                                     title="删除任务"
                                                 >
@@ -1834,7 +1843,7 @@ function App() {
                                                 </button>
                                             )}
                                             {taskVisibleLogs.map((log, i) => (
-                                                <div key={i} className="text-gray-300 break-all border-b border-gray-800/50 last:border-0 py-0.5">
+                                                <div key={taskLogStartIndex + i} className="text-gray-300 break-all border-b border-gray-800/50 last:border-0 py-0.5">
                                                     {logTime(log) && <span className="text-gray-600 mr-1">[{logTime(log)}]</span>}
                                                     {logMessage(log)}
                                                 </div>
