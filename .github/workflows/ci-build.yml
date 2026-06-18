@@ -97,16 +97,19 @@ jobs:
 
       - name: install frontend dependencies
         working-directory: bili-ticker-buy-rust
-        run: npm install
+        run: pnpm install --frozen-lockfile
 
-      - name: Build and Release
-        uses: tauri-apps/tauri-action@v0
+      - name: Build
+        working-directory: bili-ticker-buy-rust
+        run: pnpm tauri build
+
+      - name: Verify macOS bundle signature
+        if: runner.os == 'macOS'
+        working-directory: bili-ticker-buy-rust
+        run: bash scripts/verify-macos-bundle.sh
+
+      - name: Upload release assets
+        working-directory: bili-ticker-buy-rust
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          projectPath: bili-ticker-buy-rust
-          tagName: v${{ env.RELEASE_VERSION }}
-          releaseName: 'v${{ env.RELEASE_VERSION }}'
-          releaseBody: 'Automated release v${{ env.RELEASE_VERSION }}'
-          releaseDraft: false
-          prerelease: false
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/upload-release-assets.sh "${{ env.RELEASE_VERSION }}"
