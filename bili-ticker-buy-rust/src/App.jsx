@@ -9,6 +9,14 @@ import { QRCodeCanvas } from "qrcode.react";
 import logo from "./assets/logo.png";
 import "./App.css";
 
+const DEFAULT_VISIBLE_LOG_LINES = 100;
+// ponytail: keep enough in-session history; backend log pagination if users need more.
+const LOG_BUFFER_LIMIT = 1000;
+
+const appendLogLine = (lines, line) => [...lines, line].slice(-LOG_BUFFER_LIMIT);
+const logTime = (log) => typeof log === "string" ? "" : log.time;
+const logMessage = (log) => typeof log === "string" ? log : log.message;
+
 const SALES_FLAG_MAP = {
     1: "不可售",
     2: "预售",
@@ -156,6 +164,8 @@ function App() {
 
     // Runtime State
     const [logs, setLogs] = useState([]);
+    const [visibleGlobalLogLines, setVisibleGlobalLogLines] = useState(DEFAULT_VISIBLE_LOG_LINES);
+    const [visibleTaskLogLines, setVisibleTaskLogLines] = useState({});
     const [paymentUrl, setPaymentUrl] = useState("");
     const logsEndRef = useRef(null);
     const fileInputRef = useRef(null);
@@ -281,12 +291,12 @@ function App() {
             if (task_id) {
                 setTasks(prev => prev.map(t => {
                     if (t.id === task_id) {
-                        return { ...t, logs: [...t.logs, { time: timestamp, message }], lastLog: message };
+                        return { ...t, logs: appendLogLine(t.logs || [], { time: timestamp, message }), lastLog: message };
                     }
                     return t;
                 }));
             } else {
-                setLogs((prev) => [...prev, { time: timestamp, message }]);
+                setLogs((prev) => appendLogLine(prev, { time: timestamp, message }));
             }
         });
 
@@ -489,9 +499,9 @@ function App() {
 
     useEffect(() => {
         if (isAutoScroll) {
-            logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+            logsEndRef.current?.scrollIntoView();
         }
-    }, [logs, isAutoScroll]);
+    }, [logs.length, isAutoScroll]);
 
     async function startAddAccount() {
         setShowLoginModal(true);
@@ -595,10 +605,10 @@ function App() {
                 }
 
             } else {
-                setLogs(prev => [...prev, "获取项目信息失败: " + (response.msg || response.message || JSON.stringify(response))]);
+                setLogs(prev => appendLogLine(prev, "获取项目信息失败: " + (response.msg || response.message || JSON.stringify(response))));
             }
         } catch (e) {
-            setLogs(prev => [...prev, "获取项目信息失败: " + e]);
+            setLogs(prev => appendLogLine(prev, "获取项目信息失败: " + e));
         }
     }
 
@@ -759,10 +769,10 @@ function App() {
             if (code === 0 && response.data && Array.isArray(response.data.list)) {
                 setBuyers(response.data.list);
             } else {
-                setLogs(prev => [...prev, "获取购票人失败: " + (response.msg || response.message || JSON.stringify(response))]);
+                setLogs(prev => appendLogLine(prev, "获取购票人失败: " + (response.msg || response.message || JSON.stringify(response))));
             }
         } catch (e) {
-            setLogs(prev => [...prev, "获取购票人列表失败: " + e]);
+            setLogs(prev => appendLogLine(prev, "获取购票人列表失败: " + e));
         }
     }
 
@@ -831,12 +841,12 @@ function App() {
                 }
 
                 if (!silent) {
-                    setLogs(prev => [...prev, `时间已同步，偏移量: ${offsetNum.toFixed(0)}ms (Server: ${ntpServer})`]);
+                    setLogs(prev => appendLogLine(prev, `时间已同步，偏移量: ${offsetNum.toFixed(0)}ms (Server: ${ntpServer})`));
                 }
             }
         } catch (e) {
             if (!silent) {
-                setLogs(prev => [...prev, "时间同步失败: " + e]);
+                setLogs(prev => appendLogLine(prev, "时间同步失败: " + e));
             }
         } finally {
             if (!silent) setIsSyncing(false);
@@ -1076,7 +1086,7 @@ function App() {
             let currentOffset = timeOffset;
             let syncLog = "";
             try {
-                setLogs(prev => [...prev, "正在自动校准时间..."]);
+                setLogs(prev => appendLogLine(prev, "正在自动校准时间..."));
                 const result = await invoke("sync_time");
 
                 let offsetValue = 0;
@@ -1091,20 +1101,20 @@ function App() {
                 updateTimeOffset(safeOffset);
                 currentOffset = safeOffset;
                 syncLog = `时间已自动校准，偏移量: ${safeOffset}ms`;
-                setLogs(prev => [...prev, syncLog]);
+                setLogs(prev => appendLogLine(prev, syncLog));
             } catch (e) {
                 syncLog = "时间自动校准失败: " + e;
-                setLogs(prev => [...prev, syncLog]);
+                setLogs(prev => appendLogLine(prev, syncLog));
             }
 
-            setLogs(prev => [...prev, `正在启动任务，共 ${selectedBuyers.length} 个购票人...`]);
+            setLogs(prev => appendLogLine(prev, `正在启动任务，共 ${selectedBuyers.length} 个购票人...`));
 
             try {
                 // Bundle all buyers into one task
                 const args = prepareTaskPayload(); // No args = use all selectedBuyers
                 args.timeOffset = parseFloat(currentOffset);
 
-                setLogs(prev => [...prev, `请求参数: ${args.ticketInfo}`]);
+                setLogs(prev => appendLogLine(prev, `请求参数: ${args.ticketInfo}`));
 
                 let parsedTicket = null;
                 try {
@@ -1138,19 +1148,19 @@ function App() {
                 };
 
                 setTasks(prev => [newTask, ...prev]);
-                setLogs(prev => [...prev, `✅ 任务已启动`]);
+                setLogs(prev => appendLogLine(prev, `✅ 任务已启动`));
                 setActiveTab("tasks");
                 if (selectedBuyers.length > 1) {
                     setViewMode("grid");
                 }
 
             } catch (err) {
-                setLogs(prev => [...prev, `❌ 启动失败: ${err.message || err}`]);
+                setLogs(prev => appendLogLine(prev, `❌ 启动失败: ${err.message || err}`));
                 alert(`启动失败: ${err.message || err}`);
             }
 
         } catch (e) {
-            setLogs((prev) => [...prev, "启动流程异常: " + e]);
+            setLogs((prev) => appendLogLine(prev, "启动流程异常: " + e));
             alert("启动流程异常: " + e);
         }
     }
@@ -1354,6 +1364,10 @@ function App() {
             <span className={`font-medium text-sm ${activeTab === id ? "font-semibold" : ""}`}>{label}</span>
         </button>
     );
+
+    const globalVisibleLogs = logs.slice(-visibleGlobalLogLines);
+    const hiddenGlobalLogCount = Math.max(0, logs.length - globalVisibleLogs.length);
+    const globalLogStartIndex = logs.length - globalVisibleLogs.length;
 
     function handleSaveSettings() {
         const settings = {
@@ -1626,19 +1640,27 @@ function App() {
                                     </span>
                                     <div className="flex items-center gap-2">
                                         {!isAutoScroll && logs.length > 0 && (
-                                            <button onClick={() => { setIsAutoScroll(true); logsEndRef.current?.scrollIntoView({ behavior: "smooth" }); }} className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1">
+                                            <button onClick={() => { setIsAutoScroll(true); logsEndRef.current?.scrollIntoView(); }} className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1">
                                                 ↓ 回到底部
                                             </button>
                                         )}
-                                        <button onClick={() => { if (window.confirm("确定清空所有日志？")) setLogs([]); }} className="text-gray-600 hover:text-gray-400">清空</button>
+                                        <button onClick={() => { if (window.confirm("确定清空所有日志？")) { setLogs([]); setVisibleGlobalLogLines(DEFAULT_VISIBLE_LOG_LINES); } }} className="text-gray-600 hover:text-gray-400">清空</button>
                                     </div>
                                 </div>
                                 <div ref={logContainerRef} onScroll={handleLogScroll} className="flex-1 overflow-y-auto space-y-1 pr-2 custom-scrollbar">
                                     {logs.length === 0 && <div className="text-gray-700 italic text-center mt-10">暂无日志...</div>}
-                                    {logs.map((log, i) => (
-                                        <div key={i} className="text-green-400 break-all">
-                                            <span className="text-gray-600 mr-2">[{log.time}]</span>
-                                            {log.message}
+                                    {hiddenGlobalLogCount > 0 && (
+                                        <button
+                                            onClick={() => setVisibleGlobalLogLines(count => Math.min(logs.length, count + DEFAULT_VISIBLE_LOG_LINES))}
+                                            className="w-full text-center text-gray-500 hover:text-gray-300 py-1"
+                                        >
+                                            显示更早 {Math.min(DEFAULT_VISIBLE_LOG_LINES, hiddenGlobalLogCount)} 行
+                                        </button>
+                                    )}
+                                    {globalVisibleLogs.map((log, i) => (
+                                        <div key={globalLogStartIndex + i} className="text-green-400 break-all">
+                                            {logTime(log) && <span className="text-gray-600 mr-2">[{logTime(log)}]</span>}
+                                            {logMessage(log)}
                                         </div>
                                     ))}
                                     <div ref={logsEndRef} />
@@ -1685,7 +1707,7 @@ function App() {
                                             </div>
                                         </button>
                                     </div>
-                                    <button onClick={() => setTasks([])} className="text-sm text-gray-500 hover:text-white">
+                                    <button onClick={() => { setTasks([]); setVisibleTaskLogLines({}); }} className="text-sm text-gray-500 hover:text-white">
                                         清空已完成任务
                                     </button>
                                 </div>
@@ -1697,7 +1719,15 @@ function App() {
                                         暂无任务，请前往“创建任务”页面开始
                                     </div>
                                 )}
-                                {tasks.map(task => (
+                                {tasks.map(task => {
+                                    const taskLogs = task.logs || [];
+                                    const defaultTaskLogLines = viewMode === "grid" ? DEFAULT_VISIBLE_LOG_LINES : 10;
+                                    const taskVisibleLineCount = visibleTaskLogLines[task.id] || defaultTaskLogLines;
+                                    const taskVisibleLogs = taskLogs.slice(-taskVisibleLineCount);
+                                    const hiddenTaskLogCount = Math.max(0, taskLogs.length - taskVisibleLogs.length);
+                                    const taskLogStartIndex = taskLogs.length - taskVisibleLogs.length;
+
+                                    return (
                                     <div key={task.id} className={`bg-gray-800 rounded-xl border shadow-lg flex flex-col transition-all duration-300 hover:border-gray-600 hover:shadow-xl ${task.status === 'running' ? 'border-green-500/40 shadow-green-500/5' : 'border-gray-700'} ${viewMode === "grid" ? "h-[500px]" : "p-6"}`}>
                                         <div className={viewMode === "grid" ? "p-3 border-b border-gray-700 bg-gray-900/50" : "flex items-start justify-between mb-4"}>
                                             <div className="flex items-center justify-between w-full">
@@ -1752,7 +1782,14 @@ function App() {
                                                     </button>
                                                 )}
                                                 <button
-                                                    onClick={() => setTasks(prev => prev.filter(t => t.id !== task.id))}
+                                                    onClick={() => {
+                                                        setTasks(prev => prev.filter(t => t.id !== task.id));
+                                                        setVisibleTaskLogLines(prev => {
+                                                            const next = { ...prev };
+                                                            delete next[task.id];
+                                                            return next;
+                                                        });
+                                                    }}
                                                     className="p-1.5 text-gray-500 hover:text-red-400"
                                                     title="删除任务"
                                                 >
@@ -1794,22 +1831,34 @@ function App() {
 
                                         {/* Logs Preview */}
                                         <div className={`bg-black font-mono text-xs overflow-y-auto custom-scrollbar ${viewMode === "grid" ? "flex-1 p-2" : "rounded-lg p-3 h-32 bg-black/50"}`}>
-                                            {(viewMode === "grid" ? task.logs : task.logs.slice(-10)).map((log, i) => (
-                                                <div key={i} className="text-gray-300 break-all border-b border-gray-800/50 last:border-0 py-0.5">
-                                                    <span className="text-gray-600 mr-1">[{log.time}]</span>
-                                                    {log.message}
+                                            {hiddenTaskLogCount > 0 && (
+                                                <button
+                                                    onClick={() => setVisibleTaskLogLines(prev => ({
+                                                        ...prev,
+                                                        [task.id]: Math.min(taskLogs.length, taskVisibleLineCount + DEFAULT_VISIBLE_LOG_LINES)
+                                                    }))}
+                                                    className="w-full text-center text-gray-500 hover:text-gray-300 py-1"
+                                                >
+                                                    显示更早 {Math.min(DEFAULT_VISIBLE_LOG_LINES, hiddenTaskLogCount)} 行
+                                                </button>
+                                            )}
+                                            {taskVisibleLogs.map((log, i) => (
+                                                <div key={taskLogStartIndex + i} className="text-gray-300 break-all border-b border-gray-800/50 last:border-0 py-0.5">
+                                                    {logTime(log) && <span className="text-gray-600 mr-1">[{logTime(log)}]</span>}
+                                                    {logMessage(log)}
                                                 </div>
                                             ))}
-                                            {task.logs.length === 0 && <div className="text-gray-600 italic text-center mt-4">等待日志...</div>}
+                                            {taskLogs.length === 0 && <div className="text-gray-600 italic text-center mt-4">等待日志...</div>}
                                             {/* Auto scroll anchor - only when auto-scroll enabled */}
                                             <div ref={(el) => {
                                                 if (el && viewMode === "grid" && isAutoScroll) {
-                                                    el.scrollIntoView({ behavior: "smooth" });
+                                                    el.scrollIntoView();
                                                 }
                                             }} />
                                         </div>
                                     </div>
-                                ))}
+                                    );
+                                })}
                             </div>
                         </div>
                     )
