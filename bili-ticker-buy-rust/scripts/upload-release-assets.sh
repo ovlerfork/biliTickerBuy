@@ -16,8 +16,10 @@ if (( ${#files[@]} == 0 )); then
   exit 1
 fi
 
-if ! gh release view "$tag" >/dev/null 2>&1; then
-  gh release create "$tag" --title "$tag" --notes "Automated release $tag" || gh release view "$tag" >/dev/null
+if gh release view "$tag" >/dev/null 2>&1; then
+  gh release edit "$tag" --draft=false --latest --title "$tag" --notes "Automated release $tag"
+else
+  gh release create "$tag" --title "$tag" --notes "Automated release $tag" --latest || gh release view "$tag" >/dev/null
 fi
 
 gh release upload "$tag" "${files[@]}" --clobber
