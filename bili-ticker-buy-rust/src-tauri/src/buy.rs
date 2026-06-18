@@ -272,10 +272,10 @@ pub async fn start_buy_task(
             .await?;
         
         let res_json: serde_json::Value = res.json().await?;
-        emit_log(&window, &task_id, &format!("Prepare result: {:?}", res_json));
 
         if res_json["errno"].as_i64().unwrap_or(-1) != 0 && res_json["code"].as_i64().unwrap_or(-1) != 0 {
-            emit_log(&window, &task_id, &format!("Prepare failed: {:?}", res_json));
+            let errno = res_json["errno"].as_i64().or(res_json["code"].as_i64()).unwrap_or(-1);
+            emit_log(&window, &task_id, &format!("Prepare failed: {} ({}) | Msg: {}", errno, get_error_message(errno), res_json["msg"]));
             sleep(Duration::from_millis(interval)).await;
             if mode == 1 {
                 left_time -= 1;
@@ -333,10 +333,6 @@ pub async fn start_buy_task(
              }
         }
 
-        // Debug log for payload details
-        emit_log(&window, &task_id, &format!("Payload - Count: {}, Buyers: {}", create_payload["count"], create_payload["buyer_info"]));
-        emit_log(&window, &task_id, &format!("Contact Info - Name: {:?}, Tel: {:?}", create_payload.get("contact_name"), create_payload.get("contact_tel")));
-
         let mut success = false;
         
         // Use user-provided total_attempts, default to 60 if 0 passed accidentally
@@ -350,6 +346,7 @@ pub async fn start_buy_task(
                 break;
             }
             
+            let should_log_attempt = attempt == 1 || attempt == max_attempts || attempt % 10 == 0;
             let mut create_url = format!("https://show.bilibili.com/api/ticket/order/createV2?project_id={}", info.project_id);
             
             if is_hot {
@@ -377,7 +374,9 @@ pub async fn start_buy_task(
                     let r_json: serde_json::Value = r.json().await.unwrap_or(json!({}));
                     let errno = r_json["errno"].as_i64().or(r_json["code"].as_i64()).unwrap_or(-1);
                     
-                    emit_log(&window, &task_id, &format!("[Attempt {}/{}] Code: {} ({}) | Msg: {}", attempt, max_attempts, errno, get_error_message(errno), r_json["msg"]));
+                    if should_log_attempt {
+                        emit_log(&window, &task_id, &format!("[Attempt {}/{}] Code: {} ({}) | Msg: {}", attempt, max_attempts, errno, get_error_message(errno), r_json["msg"]));
+                    }
 
                     if errno == 0 || errno == 100048 || errno == 100079 {
                         success = true;
@@ -390,7 +389,7 @@ pub async fn start_buy_task(
                         };
 
                         if order_id.is_empty() {
-                            emit_log(&window, &task_id, &format!("Existing order state reached without order id: {:?}", r_json));
+                            emit_log(&window, &task_id, &format!("Existing order state reached without order id: {}", r_json["msg"]));
                             if let Err(e) = window.emit("task_result", TaskResultPayload {
                                 task_id: task_id.clone(),
                                 success: true,
@@ -461,7 +460,9 @@ pub async fn start_buy_task(
                     }
                 },
                 Err(e) => {
-                    emit_log(&window, &task_id, &format!("[Attempt {}/{}] Request error: {}", attempt, max_attempts, e));
+                    if should_log_attempt {
+                        emit_log(&window, &task_id, &format!("[Attempt {}/{}] Request error: {}", attempt, max_attempts, e));
+                    }
                 }
             }
 
