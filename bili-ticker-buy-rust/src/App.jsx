@@ -1217,7 +1217,6 @@ function App() {
 
                 setTasks(prev => [newTask, ...prev]);
                 setLogs(prev => appendLogLine(prev, `✅ 任务已启动`));
-                setActiveTab("tasks");
                 if (selectedBuyers.length > 1) {
                     setViewMode("grid");
                 }
@@ -1916,12 +1915,6 @@ function App() {
                                                 </div>
                                             ))}
                                             {taskLogs.length === 0 && <div className="text-gray-600 italic text-center mt-4">等待日志...</div>}
-                                            {/* Auto scroll anchor - only when auto-scroll enabled */}
-                                            <div ref={(el) => {
-                                                if (el && viewMode === "grid" && isAutoScroll) {
-                                                    el.scrollIntoView();
-                                                }
-                                            }} />
                                         </div>
                                     </div>
                                     );
