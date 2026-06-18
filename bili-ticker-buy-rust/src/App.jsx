@@ -12,10 +12,23 @@ import "./App.css";
 const DEFAULT_VISIBLE_LOG_LINES = 100;
 // ponytail: keep enough in-session history; backend log pagination if users need more.
 const LOG_BUFFER_LIMIT = 1000;
+const SYNC_TIME_TIMEOUT_MS = 18000;
 
 const appendLogLine = (lines, line) => [...lines, line].slice(-LOG_BUFFER_LIMIT);
 const logTime = (log) => typeof log === "string" ? "" : log.time;
 const logMessage = (log) => typeof log === "string" ? log : log.message;
+
+const formatSyncQuality = (quality) => {
+    if (!quality) return "未同步";
+    const labelMap = { good: "可靠", ok: "一般", poor: "波动大" };
+    const label = labelMap[quality.label] || "未知";
+    const sampleCount = Number(quality.sample_count || 0);
+    const failedSampleCount = Number(quality.failed_sample_count || 0);
+    const spread = Number(quality.spread || 0);
+    const roundTrip = Number(quality.best_round_trip || 0);
+    const failedText = failedSampleCount > 0 ? ` · 失败${failedSampleCount}次` : "";
+    return `${label} · ${sampleCount}次${failedText} · 波动${spread.toFixed(0)}ms · RTT${roundTrip.toFixed(0)}ms`;
+};
 
 const SALES_FLAG_MAP = {
     1: "不可售",
@@ -158,6 +171,7 @@ function App() {
     const [ntpServer, setNtpServer] = useState("https://api.bilibili.com/x/report/click/now");
     const [syncInterval, setSyncInterval] = useState(0); // 0 = 不自动同步，只在手动操作时同步
     const [lastSyncTime, setLastSyncTime] = useState(null);
+    const [syncQuality, setSyncQuality] = useState(null);
     const [proxy, setProxy] = useState("");
     const [notifications, setNotifications] = useState({
         pushplus: "",
@@ -877,9 +891,8 @@ function App() {
     async function syncTime(silent = false) {
         if (!silent) setIsSyncing(true);
         try {
-            // Add 5s timeout to prevent UI stuck
             const timeoutPromise = new Promise((_, reject) =>
-                setTimeout(() => reject(new Error("请求超时")), 5000)
+                setTimeout(() => reject(new Error("请求超时")), SYNC_TIME_TIMEOUT_MS)
             );
 
             const result = await Promise.race([
@@ -889,11 +902,15 @@ function App() {
 
             let offsetNum = 0;
             let localTime = null;
+            let quality = null;
+            let roundTrip = null;
 
-            // Handle new return structure: { diff, server, local }
+            // Handle return structure: { diff, server, local, quality }
             if (typeof result === 'object' && result !== null && 'diff' in result) {
                 offsetNum = Number(result.diff);
                 localTime = Number(result.local);
+                quality = result.quality || null;
+                roundTrip = Number(result.round_trip);
             } else {
                 // Fallback for legacy return (f64)
                 offsetNum = Number(result);
@@ -902,6 +919,7 @@ function App() {
             if (Number.isFinite(offsetNum)) {
                 updateTimeOffset(offsetNum);
                 setLastSyncTime(new Date());
+                setSyncQuality(quality);
 
                 // 强制校准本地时间显示，确保这一刻完全对齐
                 if (localTime && Number.isFinite(localTime)) {
@@ -909,7 +927,12 @@ function App() {
                 }
 
                 if (!silent) {
-                    setLogs(prev => appendLogLine(prev, `时间已同步，偏移量: ${offsetNum.toFixed(0)}ms (Server: ${ntpServer})`));
+                    const qualityText = quality
+                        ? `，${formatSyncQuality(quality)}`
+                        : Number.isFinite(roundTrip)
+                            ? `，RTT${roundTrip.toFixed(0)}ms`
+                            : "";
+                    setLogs(prev => appendLogLine(prev, `时间已同步，最佳偏移: ${offsetNum.toFixed(0)}ms${qualityText} (Server: ${ntpServer})`));
                 }
             }
         } catch (e) {
@@ -1158,8 +1181,10 @@ function App() {
                 const result = await invoke("sync_time");
 
                 let offsetValue = 0;
+                let quality = null;
                 if (typeof result === 'object' && result !== null && 'diff' in result) {
                     offsetValue = Number(result.diff);
+                    quality = result.quality || null;
                     if (result.local) setNow(new Date(result.local));
                 } else {
                     offsetValue = Number(result);
@@ -1167,8 +1192,9 @@ function App() {
 
                 const safeOffset = Number.isFinite(offsetValue) ? offsetValue : 0;
                 updateTimeOffset(safeOffset);
+                setSyncQuality(quality);
                 currentOffset = safeOffset;
-                syncLog = `时间已自动校准，偏移量: ${safeOffset}ms`;
+                syncLog = `时间已自动校准，最佳偏移: ${safeOffset}ms${quality ? `，${formatSyncQuality(quality)}` : ""}`;
                 setLogs(prev => appendLogLine(prev, syncLog));
             } catch (e) {
                 syncLog = "时间自动校准失败: " + e;
@@ -1587,7 +1613,7 @@ function App() {
                             <Clock size={14} />
                             <span className="font-mono w-32">{formatLocalTimeWithMs(now)}</span>
                         </div>
-                        <div className="flex items-center gap-2 text-sm text-blue-400 bg-blue-900/20 px-3 py-1 rounded-full" title={`NTP时间 = 本地时间 + ${timeOffset}ms`}>
+                        <div className="flex items-center gap-2 text-sm text-blue-400 bg-blue-900/20 px-3 py-1 rounded-full" title={`NTP时间 = 本地时间 + ${timeOffset}ms；${formatSyncQuality(syncQuality)}`}>
                             <Network size={14} className={isSyncing ? "animate-spin" : ""} />
                             <span className="font-mono font-bold w-28">
                                 {lastSyncTime && syncedServerDate ? formatTimeWithMs(syncedServerDate) : "未同步"}
@@ -2622,6 +2648,7 @@ function App() {
                                                     {isSyncing ? <RefreshCw size={16} className="animate-spin" /> : "立即同步"}
                                                 </button>
                                             </div>
+                                            <p className="text-xs text-gray-500 mt-2">采样质量: {formatSyncQuality(syncQuality)}</p>
                                         </div>
                                     </div>
                                 </div>

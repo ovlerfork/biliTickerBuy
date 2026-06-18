@@ -6,25 +6,189 @@
 mod auth;
 mod buy;
 mod config;
-mod util;
 mod api;
+mod util;
 mod storage;
 
-use reqwest::Client;
-use tauri::Manager;
 use buy::TicketInfo;
+use reqwest::Client;
 use storage::{Account, HistoryItem, ProjectConfig};
+use tauri::Manager;
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use uuid::Uuid;
-
 
 struct AppState {
     tasks: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     http_client: Client,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct TimeSyncSample {
+    offset: i64,
+    server: i64,
+    local_before: i64,
+    local_after: i64,
+    round_trip: i64,
+}
+
+#[derive(serde::Serialize)]
+struct TimeSyncQuality {
+    label: &'static str,
+    trustworthy: bool,
+    spread: i64,
+    best_round_trip: i64,
+    sample_count: usize,
+    failed_sample_count: usize,
+}
+
+#[derive(serde::Serialize)]
+struct TimeSyncResult {
+    diff: i64,
+    server: i64,
+    local: i64,
+    round_trip: i64,
+    spread: i64,
+    quality: TimeSyncQuality,
+    samples: Vec<TimeSyncSample>,
+}
+
+fn score_time_sample(sample: &TimeSyncSample, median_offset: i64) -> i64 {
+    sample.round_trip + (sample.offset - median_offset).abs()
+}
+
+fn build_time_sync_result(
+    mut samples: Vec<TimeSyncSample>,
+    failed_sample_count: usize,
+    current_local: i64,
+) -> Result<TimeSyncResult, String> {
+    const MIN_SUCCESSFUL_TIME_SYNC_SAMPLES: usize = 3;
+
+    if samples.len() < MIN_SUCCESSFUL_TIME_SYNC_SAMPLES {
+        return Err(format!(
+            "Too few time samples collected: {}/{} succeeded",
+            samples.len(),
+            samples.len() + failed_sample_count
+        ));
+    }
+
+    let mut offsets: Vec<i64> = samples.iter().map(|sample| sample.offset).collect();
+    offsets.sort_unstable();
+    let median_offset = offsets[offsets.len() / 2];
+    let min_offset = *offsets.first().unwrap();
+    let max_offset = *offsets.last().unwrap();
+    let spread = max_offset - min_offset;
+
+    samples.sort_by_key(|sample| score_time_sample(sample, median_offset));
+    let best = samples[0].clone();
+    let trustworthy = samples.len() >= 3 && spread <= 200 && best.round_trip <= 1500;
+    let label = if trustworthy {
+        "good"
+    } else if spread <= 500 && best.round_trip <= 3000 {
+        "ok"
+    } else {
+        "poor"
+    };
+
+    Ok(TimeSyncResult {
+        diff: best.offset,
+        server: current_local + best.offset,
+        local: current_local,
+        round_trip: best.round_trip,
+        spread,
+        quality: TimeSyncQuality {
+            label,
+            trustworthy,
+            spread,
+            best_round_trip: best.round_trip,
+            sample_count: samples.len(),
+            failed_sample_count,
+        },
+        samples,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn time_sync_result_prefers_low_latency_consistent_sample() {
+        let result = build_time_sync_result(
+            vec![
+                TimeSyncSample {
+                    offset: 100,
+                    server: 1_100,
+                    local_before: 900,
+                    local_after: 1_000,
+                    round_trip: 100,
+                },
+                TimeSyncSample {
+                    offset: 103,
+                    server: 1_103,
+                    local_before: 900,
+                    local_after: 1_020,
+                    round_trip: 120,
+                },
+                TimeSyncSample {
+                    offset: 210,
+                    server: 1_210,
+                    local_before: 900,
+                    local_after: 950,
+                    round_trip: 50,
+                },
+            ],
+            0,
+            2_000,
+        )
+        .unwrap();
+
+        assert_eq!(result.diff, 100);
+        assert_eq!(result.spread, 110);
+        assert!(result.quality.trustworthy);
+        assert_eq!(result.quality.sample_count, 3);
+        assert_eq!(result.quality.failed_sample_count, 0);
+    }
+
+    #[test]
+    fn time_sync_result_allows_failed_samples_when_successes_are_enough() {
+        let result = build_time_sync_result(
+            vec![
+                TimeSyncSample {
+                    offset: 100,
+                    server: 1_100,
+                    local_before: 900,
+                    local_after: 1_000,
+                    round_trip: 100,
+                },
+                TimeSyncSample {
+                    offset: 105,
+                    server: 1_105,
+                    local_before: 900,
+                    local_after: 1_010,
+                    round_trip: 110,
+                },
+                TimeSyncSample {
+                    offset: 98,
+                    server: 1_098,
+                    local_before: 900,
+                    local_after: 1_006,
+                    round_trip: 106,
+                },
+            ],
+            2,
+            2_000,
+        )
+        .unwrap();
+
+        assert_eq!(result.quality.sample_count, 3);
+        assert_eq!(result.quality.failed_sample_count, 2);
+        assert!(result.quality.trustworthy);
+    }
 }
 
 fn get_app_dir(app_handle: &tauri::AppHandle) -> PathBuf {
@@ -174,27 +338,60 @@ async fn fetch_address_list(state: tauri::State<'_, AppState>, cookies: Vec<Stri
 }
 
 #[tauri::command]
-async fn sync_time(state: tauri::State<'_, AppState>, server_url: Option<String>) -> Result<serde_json::Value, String> {
-    let url = server_url.unwrap_or_else(|| "https://api.bilibili.com/x/report/click/now".to_string());
+async fn sync_time(
+    state: tauri::State<'_, AppState>,
+    server_url: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let url =
+        server_url.unwrap_or_else(|| "https://api.bilibili.com/x/report/click/now".to_string());
+    let mut samples = Vec::new();
+    let mut failed_sample_count = 0;
 
-    let server_time = if url.starts_with("http") {
-        api::get_server_time(&state.http_client, Some(url)).await.map_err(|e| e.to_string())?
-    } else {
-        // Wrap blocking NTP call in spawn_blocking to avoid blocking the async runtime
-        let ntp_url = url.clone();
-        tokio::task::spawn_blocking(move || {
-            api::get_ntp_time(&ntp_url).map(|t| t as i64)
-        }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?
-    };
+    for attempt in 0..5 {
+        let local_before = api::get_local_time();
+        let server_time_result = if url.starts_with("http") {
+            api::get_server_time(&state.http_client, Some(url.clone()))
+                .await
+                .map_err(|e| e.to_string())
+        } else {
+            // Wrap blocking NTP call in spawn_blocking to avoid blocking the async runtime
+            let ntp_url = url.clone();
+            tokio::task::spawn_blocking(move || api::get_ntp_time(&ntp_url).map(|t| t as i64))
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|result| result.map_err(|e| e.to_string()))
+        };
 
-    let local_time = api::get_local_time();
-    let diff = server_time - local_time;
-    
-    Ok(serde_json::json!({
-        "diff": diff,
-        "server": server_time,
-        "local": local_time
-    }))
+        match server_time_result {
+            Ok(server_time) => {
+                let local_after = api::get_local_time();
+                let round_trip = local_after.saturating_sub(local_before);
+                let local_midpoint = local_before.saturating_add(round_trip / 2);
+
+                samples.push(TimeSyncSample {
+                    offset: server_time.saturating_sub(local_midpoint),
+                    server: server_time,
+                    local_before,
+                    local_after,
+                    round_trip,
+                });
+            }
+            Err(_) => {
+                failed_sample_count += 1;
+            }
+        }
+
+        if attempt < 4 {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+        }
+    }
+
+    serde_json::to_value(build_time_sync_result(
+        samples,
+        failed_sample_count,
+        api::get_local_time(),
+    )?)
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
