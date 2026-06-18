@@ -17,6 +17,9 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: install Rust
+      uses: dtolnay/rust-toolchain@1.85.1
+
     - name: Debug - show files and find Cargo.toml
       run: |
         echo "PWD: $(pwd)"
