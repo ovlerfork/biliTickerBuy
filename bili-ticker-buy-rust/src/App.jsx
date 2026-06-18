@@ -98,6 +98,10 @@ const sanitizeBuyer = (buyer, fallbackTel = "") => {
     return sanitized;
 };
 
+// ponytail: cap live renderer logs; add persisted full-log viewing only if users need it.
+const TASK_LOG_LIMIT = 80;
+const TASK_LOG_RENDER_LIMIT = 40;
+
 function App() {
     const [activeTab, setActiveTab] = useState("run");
     const [tasks, setTasks] = useState([]);
@@ -285,16 +289,76 @@ function App() {
             }
         });
 
+        const pendingTaskLogs = new Map();
+        let logFlushId = null;
+        let logFlushType = null;
+
+        const flushTaskLogs = () => {
+            logFlushId = null;
+            logFlushType = null;
+            if (pendingTaskLogs.size === 0) return;
+
+            const updates = new Map(pendingTaskLogs);
+            pendingTaskLogs.clear();
+
+            setTasks(prev => {
+                let changed = false;
+                const next = prev.map(t => {
+                    const taskLogs = updates.get(t.id);
+                    if (!taskLogs || taskLogs.length === 0) return t;
+                    changed = true;
+                    return {
+                        ...t,
+                        logs: [...(t.logs || []), ...taskLogs].slice(-TASK_LOG_LIMIT),
+                        lastLog: taskLogs[taskLogs.length - 1].message
+                    };
+                });
+                return changed ? next : prev;
+            });
+        };
+
+        const cancelTaskLogFlush = () => {
+            if (logFlushId === null) return;
+            if (logFlushType === "raf") {
+                window.cancelAnimationFrame(logFlushId);
+            } else {
+                clearTimeout(logFlushId);
+            }
+            logFlushId = null;
+            logFlushType = null;
+        };
+
+        const flushTaskLogsNow = () => {
+            cancelTaskLogFlush();
+            flushTaskLogs();
+        };
+
+        const scheduleTaskLogFlush = () => {
+            if (logFlushId !== null) return;
+            if (typeof window.requestAnimationFrame === "function") {
+                logFlushType = "raf";
+                logFlushId = window.requestAnimationFrame(flushTaskLogs);
+            } else {
+                logFlushType = "timeout";
+                logFlushId = setTimeout(flushTaskLogs, 16);
+            }
+        };
+
+        const queueTaskLog = (taskId, log) => {
+            const taskLogs = pendingTaskLogs.get(taskId) || [];
+            taskLogs.push(log);
+            if (taskLogs.length > TASK_LOG_LIMIT) {
+                taskLogs.splice(0, taskLogs.length - TASK_LOG_LIMIT);
+            }
+            pendingTaskLogs.set(taskId, taskLogs);
+            scheduleTaskLogFlush();
+        };
+
         const unlistenLog = listen("log", (event) => {
             const { task_id, message } = event.payload;
             const timestamp = new Date().toLocaleTimeString();
             if (task_id) {
-                setTasks(prev => prev.map(t => {
-                    if (t.id === task_id) {
-                        return { ...t, logs: appendLogLine(t.logs || [], { time: timestamp, message }), lastLog: message };
-                    }
-                    return t;
-                }));
+                queueTaskLog(task_id, { time: timestamp, message });
             } else {
                 setLogs((prev) => appendLogLine(prev, { time: timestamp, message }));
             }
@@ -302,6 +366,7 @@ function App() {
 
         const unlistenTaskResult = listen("task_result", (event) => {
             const { task_id, success, message } = event.payload;
+            flushTaskLogsNow();
 
             // Update task status
             setTasks(prev => prev.map(t => {
@@ -334,6 +399,7 @@ function App() {
 
         const unlistenPayment = listen("payment_qrcode", (event) => {
             const { task_id, url } = event.payload;
+            flushTaskLogsNow();
             if (task_id) {
                 setTasks(prev => prev.map(t => {
                     if (t.id === task_id) {
@@ -352,6 +418,8 @@ function App() {
         initApp();
 
         return () => {
+            cancelTaskLogFlush();
+            pendingTaskLogs.clear();
             unlistenLog.then((f) => f());
             unlistenPayment.then((f) => f());
             unlistenTaskResult.then((f) => f());
@@ -1199,7 +1267,6 @@ function App() {
             };
 
             setTasks(prev => [newTask, ...prev]);
-            setActiveTab("tasks");
             alert(`已保存任务到任务列表`);
         } catch (e) {
             alert("保存任务失败: " + e);
@@ -1721,7 +1788,7 @@ function App() {
                                 )}
                                 {tasks.map(task => {
                                     const taskLogs = task.logs || [];
-                                    const defaultTaskLogLines = viewMode === "grid" ? DEFAULT_VISIBLE_LOG_LINES : 10;
+                                    const defaultTaskLogLines = viewMode === "grid" ? TASK_LOG_RENDER_LIMIT : 10;
                                     const taskVisibleLineCount = visibleTaskLogLines[task.id] || defaultTaskLogLines;
                                     const taskVisibleLogs = taskLogs.slice(-taskVisibleLineCount);
                                     const hiddenTaskLogCount = Math.max(0, taskLogs.length - taskVisibleLogs.length);
@@ -1842,8 +1909,8 @@ function App() {
                                                     显示更早 {Math.min(DEFAULT_VISIBLE_LOG_LINES, hiddenTaskLogCount)} 行
                                                 </button>
                                             )}
-                                            {taskVisibleLogs.map((log, i) => (
-                                                <div key={taskLogStartIndex + i} className="text-gray-300 break-all border-b border-gray-800/50 last:border-0 py-0.5">
+                                            {(viewMode === "grid" ? [...taskVisibleLogs].reverse() : taskVisibleLogs).map((log, i) => (
+                                                <div key={viewMode === "grid" ? taskLogStartIndex + taskVisibleLogs.length - 1 - i : taskLogStartIndex + i} className="text-gray-300 break-all border-b border-gray-800/50 last:border-0 py-0.5">
                                                     {logTime(log) && <span className="text-gray-600 mr-1">[{logTime(log)}]</span>}
                                                     {logMessage(log)}
                                                 </div>
