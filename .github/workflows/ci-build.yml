@@ -10,11 +10,17 @@ on:
     paths-ignore:
       - 'README.md'
       - '.gitignore'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build, without v prefix'
+        required: true
+        default: '0.1.8'
 
 jobs:
   bump-version:
     # Skip if the commit IS the version bump to avoid loops (though GITHUB_TOKEN prevents it anyway)
-    if: "!contains(github.event.head_commit.message, 'chore(release)')"
+    if: github.event_name == 'push' && !contains(github.event.head_commit.message, 'chore(release)')
     runs-on: ubuntu-latest
     outputs:
       new_version: ${{ steps.get_version.outputs.new_version }}
@@ -58,7 +64,7 @@ jobs:
 
   build-release:
     needs: bump-version
-    if: needs.bump-version.outputs.new_version != ''
+    if: always() && (needs.bump-version.outputs.new_version != '' || github.event_name == 'workflow_dispatch')
     permissions:
       contents: write
     strategy:
@@ -67,19 +73,26 @@ jobs:
         platform: [macos-latest, windows-latest]
 
     runs-on: ${{ matrix.platform }}
+    env:
+      RELEASE_VERSION: ${{ github.event.inputs.version || needs.bump-version.outputs.new_version }}
 
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: v${{ needs.bump-version.outputs.new_version }}
+          ref: v${{ env.RELEASE_VERSION }}
 
       - name: setup node
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: install Rust
+        uses: dtolnay/rust-toolchain@1.74.0
+
+      - name: setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
 
       - name: install frontend dependencies
         working-directory: bili-ticker-buy-rust
@@ -91,8 +104,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: bili-ticker-buy-rust
-          tagName: v${{ needs.bump-version.outputs.new_version }}
-          releaseName: 'v${{ needs.bump-version.outputs.new_version }}'
-          releaseBody: 'Automated release v${{ needs.bump-version.outputs.new_version }}'
+          tagName: v${{ env.RELEASE_VERSION }}
+          releaseName: 'v${{ env.RELEASE_VERSION }}'
+          releaseBody: 'Automated release v${{ env.RELEASE_VERSION }}'
           releaseDraft: false
           prerelease: false
