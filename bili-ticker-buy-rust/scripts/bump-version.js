@@ -7,6 +7,7 @@ const packageJsonPath = path.join(rootDir, 'package.json');
 const tauriConfPath = path.join(rootDir, 'src-tauri', 'tauri.conf.json');
 const cargoTomlPath = path.join(rootDir, 'src-tauri', 'Cargo.toml');
 
+// Keep this script tiny: CI owns release version bumps.
 function getVersion() {
     const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
     return pkg.version;
