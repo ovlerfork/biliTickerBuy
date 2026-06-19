@@ -322,36 +322,77 @@ pub async fn get_server_time(client: &Client, url_opt: Option<String>) -> Result
         .json()
         .await?;
     
-    // 1. Bilibili Format: {"data": {"now": 169...}} (Seconds)
-    if let Some(now) = res["data"]["now"].as_i64() {
-        return Ok(now * 1000);
+    // 1. Bilibili Format: {"data": {"now": 169...}} (Seconds, sometimes fractional seconds)
+    if let Some(t) = parse_bilibili_now_to_millis(&res["data"]["now"]) {
+        return Ok(t);
     }
 
     // 2. Taobao Format: {"data": {"t": "169..."}} (Millis String)
-    if let Some(t_str) = res["data"]["t"].as_str() {
-        if let Ok(t) = t_str.parse::<i64>() {
-            return Ok(t);
-        }
+    if let Some(t) = parse_epoch_millis(&res["data"]["t"]) {
+        return Ok(t);
     }
 
     // 3. JD Format: {"serverTime": 169...} (Millis)
-    if let Some(t) = res["serverTime"].as_i64() {
+    if let Some(t) = parse_epoch_millis(&res["serverTime"]) {
         return Ok(t);
     }
 
     // 4. Pinduoduo/Other: {"server_time": 169...} (Seconds or Millis?)
-    // Let's assume generic "time" or "timestamp" fields if found
-    if let Some(t) = res["time"].as_i64() {
-        // Guess if seconds or millis based on magnitude
-        // 2023 is ~1.7e9 seconds, ~1.7e12 millis
-        if t > 100_000_000_000 {
+    // Guess generic time fields by magnitude.
+    for field in ["server_time", "time", "timestamp"] {
+        if let Some(t) = parse_epoch_millis(&res[field]) {
             return Ok(t);
-        } else {
-            return Ok(t * 1000);
         }
     }
 
     Err(anyhow!("Failed to parse server time from response"))
+}
+
+fn parse_epoch_millis(value: &Value) -> Option<i64> {
+    let raw = match value {
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.trim().to_string(),
+        _ => return None,
+    };
+    let t = raw.parse::<i64>().ok()?;
+
+    if t > 100_000_000_000 {
+        Some(t)
+    } else {
+        t.checked_mul(1000)
+    }
+}
+
+fn parse_bilibili_now_to_millis(value: &Value) -> Option<i64> {
+    let raw = match value {
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.trim().to_string(),
+        _ => return None,
+    };
+
+    if let Some((seconds, fraction)) = raw.split_once('.') {
+        let seconds = seconds.parse::<i64>().ok()?;
+        let millis = parse_millis_fraction(fraction)?;
+        return seconds.checked_mul(1000)?.checked_add(millis);
+    }
+
+    parse_epoch_millis(value)
+}
+
+fn parse_millis_fraction(fraction: &str) -> Option<i64> {
+    if fraction.is_empty() || !fraction.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+
+    let mut millis = 0;
+    for digit in fraction.chars().take(3) {
+        millis = millis * 10 + digit.to_digit(10)? as i64;
+    }
+    for _ in fraction.len()..3 {
+        millis *= 10;
+    }
+
+    Some(millis)
 }
 
 pub fn get_local_time() -> i64 {
@@ -376,4 +417,39 @@ pub fn get_ntp_time(server: &str) -> Result<u64> {
     // Calculate milliseconds: seconds * 1000 + nanoseconds / 1_000_000
     let millis = (result.seconds as u64 * 1000) + ((result.seconds_fraction as u64 * 1000) >> 32);
     Ok(millis)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parses_bilibili_fractional_seconds_as_millis() {
+        let value: Value = serde_json::from_str(r#"1690000000.123"#).unwrap();
+
+        assert_eq!(parse_bilibili_now_to_millis(&value), Some(1_690_000_000_123));
+    }
+
+    #[test]
+    fn parses_bilibili_integer_seconds_as_millis() {
+        assert_eq!(
+            parse_bilibili_now_to_millis(&json!(1_690_000_000)),
+            Some(1_690_000_000_000)
+        );
+    }
+
+    #[test]
+    fn keeps_bilibili_integer_millis() {
+        assert_eq!(
+            parse_bilibili_now_to_millis(&json!(1_690_000_000_123i64)),
+            Some(1_690_000_000_123)
+        );
+    }
+
+    #[test]
+    fn parses_generic_seconds_and_millis() {
+        assert_eq!(parse_epoch_millis(&json!(1_690_000_000)), Some(1_690_000_000_000));
+        assert_eq!(parse_epoch_millis(&json!("1690000000123")), Some(1_690_000_000_123));
+    }
 }
