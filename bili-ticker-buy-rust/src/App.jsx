@@ -14,39 +14,12 @@ const DEFAULT_VISIBLE_LOG_LINES = 100;
 const LOG_BUFFER_LIMIT = 1000;
 const SYNC_TIME_TIMEOUT_MS = 18000;
 const DEFAULT_TIME_SERVER = "ntp.aliyun.com";
+const BILIBILI_SECONDS_TIME_API = "https://api.bilibili.com/x/report/click/now";
 
 const appendLogLine = (lines, line) => [...lines, line].slice(-LOG_BUFFER_LIMIT);
 const logTime = (log) => typeof log === "string" ? "" : log.time;
 const logMessage = (log) => typeof log === "string" ? log : log.message;
-const BEIJING_TIME_FORMAT = new Intl.DateTimeFormat("zh-CN", {
-    timeZone: "Asia/Shanghai",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23"
-});
-const formatBeijingDateTime = (date) => {
-    const parts = Object.fromEntries(
-        BEIJING_TIME_FORMAT.formatToParts(date).map(({ type, value }) => [type, value])
-    );
-    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
-};
-const formatBeijingTimeWithMs = (date) => {
-    const time = formatBeijingDateTime(date).split(" ")[1];
-    return `${time}.${date.getMilliseconds().toString().padStart(3, "0")}`;
-};
-const formatBeijingTime = (date) => formatBeijingDateTime(date).split(" ")[1];
-const getSyncQualityIssue = (quality) => {
-    if (!quality) return null;
-    if (Number(quality.sample_count || 0) < 2) return "有效时间样本不足";
-    if (quality.label === "poor") return "时间采样波动过大";
-    if (Number(quality.best_round_trip || 0) > 1500) return "时间服务器响应过慢";
-    if (Number(quality.spread || 0) > 200) return "时间样本离散过大";
-    return null;
-};
+const normalizeTimeServer = (server) => server === BILIBILI_SECONDS_TIME_API ? DEFAULT_TIME_SERVER : server;
 
 const formatSyncQuality = (quality) => {
     if (!quality) return "未同步";
@@ -198,6 +171,7 @@ function App() {
 
     // Advanced Settings
     const [timeOffset, setTimeOffsetState] = useState(0);
+    const [ntpServer, setNtpServer] = useState(DEFAULT_TIME_SERVER);
     const [syncInterval, setSyncInterval] = useState(0); // 0 = 不自动同步，只在手动操作时同步
     const [lastSyncTime, setLastSyncTime] = useState(null);
     const [syncQuality, setSyncQuality] = useState(null);
@@ -278,7 +252,13 @@ function App() {
 
     const syncedServerDate = getSyncedServerDate();
 
-    const formatLocalTimeWithMs = formatBeijingTimeWithMs;
+    const formatLocalTimeWithMs = (date) => {
+        const h = date.getHours().toString().padStart(2, '0');
+        const m = date.getMinutes().toString().padStart(2, '0');
+        const s = date.getSeconds().toString().padStart(2, '0');
+        const ms = date.getMilliseconds().toString().padStart(3, '0');
+        return `${h}:${m}:${s}.${ms}`;
+    };
 
     useEffect(() => {
         const saved = localStorage.getItem("bili_recent_inputs");
@@ -294,6 +274,7 @@ function App() {
                 const settings = JSON.parse(savedSettings);
                 if (settings.proxy) setProxy(settings.proxy);
                 if (settings.notifications) setNotifications(settings.notifications);
+                if (settings.ntpServer) setNtpServer(normalizeTimeServer(settings.ntpServer));
                 if (settings.syncInterval) setSyncInterval(settings.syncInterval);
                 // timeOffset is usually synced on startup, but we can load it too if needed
                 // if (settings.timeOffset) updateTimeOffset(settings.timeOffset);
@@ -392,7 +373,7 @@ function App() {
 
         const unlistenLog = listen("log", (event) => {
             const { task_id, message } = event.payload;
-            const timestamp = formatBeijingTime(new Date());
+            const timestamp = new Date().toLocaleTimeString();
             if (task_id) {
                 queueTaskLog(task_id, { time: timestamp, message });
             } else {
@@ -682,7 +663,10 @@ function App() {
 
                 // Auto-set start time if available
                 if (response.data.sale_start) {
-                    setTimeStart(formatBeijingDateTime(new Date(response.data.sale_start * 1000)));
+                    // Convert timestamp to YYYY-MM-DD HH:MM:SS
+                    const date = new Date(response.data.sale_start * 1000);
+                    const formatted = date.toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-');
+                    setTimeStart(formatted);
                 } else if (response.data.sale_start_str) {
                     setTimeStart(response.data.sale_start_str);
                 }
@@ -733,7 +717,8 @@ function App() {
             let timeStr = sku.sale_start;
             // If it's a timestamp (number), convert it.
             if (typeof timeStr === 'number') {
-                timeStr = formatBeijingDateTime(new Date(timeStr * 1000));
+                const date = new Date(timeStr * 1000);
+                timeStr = date.toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-');
             }
             if (timeStr) {
                 setTimeStart(timeStr);
@@ -822,6 +807,7 @@ function App() {
                 if (config.totalAttempts) setTotalAttempts(config.totalAttempts);
                 if (config.proxy) setProxy(config.proxy);
                 if (typeof config.timeOffset !== "undefined") updateTimeOffset(config.timeOffset);
+                if (config.ntpServer) setNtpServer(normalizeTimeServer(config.ntpServer));
                 if (config.buyerAddresses) {
                     const normalizedMap = Object.fromEntries(
                         Object.entries(config.buyerAddresses).map(([key, addr]) => [key, normalizeAddress(addr)])
@@ -914,7 +900,7 @@ function App() {
             );
 
             const result = await Promise.race([
-                invoke("sync_time", { serverUrl: DEFAULT_TIME_SERVER }),
+                invoke("sync_time", { serverUrl: ntpServer }),
                 timeoutPromise
             ]);
 
@@ -950,7 +936,7 @@ function App() {
                         : Number.isFinite(roundTrip)
                             ? `，RTT${roundTrip.toFixed(0)}ms`
                             : "";
-                    setLogs(prev => appendLogLine(prev, `时间已同步，最佳偏移: ${offsetNum.toFixed(0)}ms${qualityText} (Server: ${DEFAULT_TIME_SERVER})`));
+                    setLogs(prev => appendLogLine(prev, `时间已同步，最佳偏移: ${offsetNum.toFixed(0)}ms${qualityText} (Server: ${ntpServer})`));
                 }
             }
         } catch (e) {
@@ -963,7 +949,13 @@ function App() {
     }
 
     // Helper to format time with milliseconds
-    const formatTimeWithMs = formatBeijingTimeWithMs;
+    const formatTimeWithMs = (date) => {
+        const h = date.getHours().toString().padStart(2, '0');
+        const m = date.getMinutes().toString().padStart(2, '0');
+        const s = date.getSeconds().toString().padStart(2, '0');
+        const ms = date.getMilliseconds().toString().padStart(3, '0');
+        return `${h}:${m}:${s}.${ms}`;
+    };
 
     function toggleBuyer(buyer) {
         const buyerId = String(buyer.id);
@@ -1170,7 +1162,7 @@ function App() {
             proxy,
             timeOffset: parseFloat(timeOffset),
             buyers: sanitizedBuyers,
-            ntpServer: DEFAULT_TIME_SERVER
+            ntpServer
         };
     }
 
@@ -1190,7 +1182,7 @@ function App() {
             let syncLog = "";
             try {
                 setLogs(prev => appendLogLine(prev, "正在自动校准时间..."));
-                const result = await invoke("sync_time", { serverUrl: DEFAULT_TIME_SERVER });
+                const result = await invoke("sync_time");
 
                 let offsetValue = 0;
                 let quality = null;
@@ -1208,18 +1200,9 @@ function App() {
                 currentOffset = safeOffset;
                 syncLog = `时间已自动校准，最佳偏移: ${safeOffset}ms${quality ? `，${formatSyncQuality(quality)}` : ""}`;
                 setLogs(prev => appendLogLine(prev, syncLog));
-                const syncIssue = getSyncQualityIssue(quality);
-                if (syncIssue) {
-                    const message = `时间校准质量不足：${syncIssue}，请重新同步后再启动任务`;
-                    setLogs(prev => appendLogLine(prev, message));
-                    alert(message);
-                    return;
-                }
             } catch (e) {
                 syncLog = "时间自动校准失败: " + e;
                 setLogs(prev => appendLogLine(prev, syncLog));
-                alert(syncLog);
-                return;
             }
 
             setLogs(prev => appendLogLine(prev, `正在启动任务，共 ${selectedBuyers.length} 个购票人...`));
@@ -1253,7 +1236,7 @@ function App() {
                     sku: selectedSku?.desc || "Default",
                     buyerCount: selectedBuyers.length,
                     buyers: selectedBuyers, // Store all buyers
-                    startTime: timeStart || formatBeijingTime(new Date()),
+                    startTime: timeStart || new Date().toLocaleTimeString(),
                     status: timeStart ? "scheduled" : "running",
                     logs: [syncLog],
                     lastLog: timeStart ? `Waiting for ${timeStart}` : `Starting for ${selectedBuyers.length} buyers...`,
@@ -1330,7 +1313,7 @@ function App() {
             const runningTask = {
                 ...task,
                 id: taskId,
-                startTime: formatBeijingTime(new Date()),
+                startTime: new Date().toLocaleTimeString(),
                 status: "running",
                 lastLog: "Starting...",
                 logs: []
@@ -1487,6 +1470,7 @@ function App() {
             proxy,
             notifications,
             timeOffset,
+            ntpServer,
             syncInterval
         };
         localStorage.setItem("bili_settings", JSON.stringify(settings));
@@ -1669,7 +1653,7 @@ function App() {
                                 <div className="bg-gray-800 rounded-2xl p-6 shadow-lg border border-gray-700 relative overflow-hidden hover:-translate-y-1 hover:shadow-xl transition-all duration-300">
                                     <div className="relative z-10">
                                         <div className="text-gray-400 text-sm font-bold mb-1">系统状态</div>
-                                        <div className="text-2xl font-bold mb-2 font-mono">{formatBeijingTime(now)}</div>
+                                        <div className="text-2xl font-bold mb-2 font-mono">{now.toLocaleTimeString()}</div>
                                         <div className="flex items-center gap-2 text-sm text-green-400">
                                             <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
                                             运行正常
@@ -2118,7 +2102,7 @@ function App() {
                                                             <span className="text-gray-500">开售时间:</span>
                                                             <span className="text-white font-mono">
                                                                 {projectInfo.sale_start
-                                                                    ? formatBeijingDateTime(new Date(projectInfo.sale_start * 1000))
+                                                                    ? new Date(projectInfo.sale_start * 1000).toLocaleString()
                                                                     : (projectInfo.sale_start_str || "未知")}
                                                             </span>
                                                         </div>
@@ -2126,7 +2110,7 @@ function App() {
                                                             <div className="flex gap-2">
                                                                 <span className="text-gray-500">结束时间:</span>
                                                                 <span className="text-white font-mono">
-                                                                    {formatBeijingDateTime(new Date(projectInfo.sale_end * 1000))}
+                                                                    {new Date(projectInfo.sale_end * 1000).toLocaleString()}
                                                                 </span>
                                                             </div>
                                                         )}
@@ -2444,7 +2428,9 @@ function App() {
                                                         />
                                                         <button
                                                             onClick={() => {
-                                                                setTimeStart(formatBeijingDateTime(new Date()));
+                                                                const now = new Date();
+                                                                const str = now.toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-');
+                                                                setTimeStart(str);
                                                             }}
                                                             className="px-3 bg-gray-700 hover:bg-gray-600 rounded-lg text-white font-bold text-xs whitespace-nowrap transition-colors"
                                                             title="设为当前时间"
@@ -2458,7 +2444,8 @@ function App() {
                                                                 const now = new Date();
                                                                 now.setSeconds(59);
                                                                 now.setMilliseconds(900);
-                                                                setTimeStart(formatBeijingDateTime(now));
+                                                                const str = now.toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-');
+                                                                setTimeStart(str);
                                                             }}
                                                             className="py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-xs text-gray-300 transition-colors"
                                                         >
@@ -2471,7 +2458,8 @@ function App() {
                                                                     const now = new Date();
                                                                     now.setMinutes(now.getMinutes() + m);
                                                                     now.setSeconds(0);
-                                                                    setTimeStart(formatBeijingDateTime(now));
+                                                                    const str = now.toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-');
+                                                                    setTimeStart(str);
                                                                 }}
                                                                 className="py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-xs text-gray-300 transition-colors"
                                                             >
@@ -2614,11 +2602,28 @@ function App() {
                                                 <input
                                                     type="text"
                                                     className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:border-blue-500 focus:outline-none"
-                                                    value={DEFAULT_TIME_SERVER}
-                                                    readOnly
+                                                    placeholder="ntp.aliyun.com 或 HTTP 时间 API"
+                                                    value={ntpServer}
+                                                    onChange={(e) => setNtpServer(e.target.value)}
                                                 />
+                                                <div className="flex flex-wrap gap-2">
+                                                    {[
+                                                        { name: "阿里云 NTP", value: "ntp.aliyun.com" },
+                                                        { name: "淘宝 API", value: "http://api.m.taobao.com/rest/api3.do?api=mtop.common.getTimestamp" },
+                                                        { name: "腾讯云 NTP", value: "ntp.tencent.com" },
+                                                        { name: "国家授时", value: "ntp.ntsc.ac.cn" }
+                                                    ].map((server) => (
+                                                        <button
+                                                            key={server.name}
+                                                            onClick={() => setNtpServer(server.value)}
+                                                            className="px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-xs text-gray-300 transition-colors border border-gray-600"
+                                                        >
+                                                            {server.name}
+                                                        </button>
+                                                    ))}
+                                                </div>
                                             </div>
-                                            <p className="text-xs text-gray-500 mt-1">默认使用阿里云 NTP，旧版 B站时间 API 会自动改为阿里云</p>
+                                            <p className="text-xs text-gray-500 mt-1">支持 HTTP API (如 B站/淘宝) 或 NTP 服务器域名</p>
                                         </div>
                                         <div>
                                             <label className="block text-sm font-medium text-gray-400 mb-2">同步间隔 (毫秒，0 = 不自动同步)</label>
