@@ -7,7 +7,7 @@ import {
     sendNotification as tauriSendNotification
 } from "@tauri-apps/api/notification";
 
-export const isWeb = !window.__TAURI__;
+export const isWeb = import.meta.env.VITE_APP_TARGET === "web";
 
 const listeners = new Map();
 let eventCursor = 0;
@@ -41,12 +41,14 @@ export async function listen(event, handler) {
 }
 
 export async function isPermissionGranted() {
-    if (!isWeb || !("Notification" in window)) return tauriIsPermissionGranted();
+    if (!isWeb) return tauriIsPermissionGranted();
+    if (!("Notification" in window)) return false;
     return Notification.permission === "granted";
 }
 
 export async function requestPermission() {
-    if (!isWeb || !("Notification" in window)) return tauriRequestPermission();
+    if (!isWeb) return tauriRequestPermission();
+    if (!("Notification" in window)) return "denied";
     return Notification.requestPermission();
 }
 

@@ -4,8 +4,11 @@
   "version": "0.1.20",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
+    "dev": "vite --mode desktop",
+    "dev:web": "vite --mode web",
+    "build": "pnpm build:desktop",
+    "build:desktop": "vite build --mode desktop",
+    "build:web": "vite build --mode web",
     "preview": "vite preview",
     "tauri": "tauri"
   },

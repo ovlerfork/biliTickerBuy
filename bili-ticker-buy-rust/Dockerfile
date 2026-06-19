@@ -7,7 +7,7 @@ COPY src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/build.rs src-tauri/taur
 COPY src-tauri/icons ./icons
 COPY src-tauri/src ./src
 COPY dist ../dist
-RUN cargo build --release --no-default-features --bin web
+RUN cargo build --release --no-default-features --features web --bin web
 
 FROM debian:bookworm-slim
 WORKDIR /app
