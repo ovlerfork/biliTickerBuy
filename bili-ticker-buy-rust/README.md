@@ -86,6 +86,12 @@ docker run --rm -p 8080:8080 -v bili-ticker-buy-data:/data bili-ticker-buy-web
 docker run --rm -p 8080:8080 -e WEB_PASSWORD='change-me' -v bili-ticker-buy-data:/data bili-ticker-buy-web
 ```
 
+使用 GHCR 镜像部署可参考 `compose.example.yml`：
+
+```bash
+docker compose -f compose.example.yml up -d
+```
+
 说明：Web 版复用 Rust 抢票逻辑，账号、历史和项目配置保存在 `/data`。浏览器环境不能像 Tauri 桌面版一样注入 B 站网页 Cookie，“打开 B 站”会退化为打开官网。
 
 ---
