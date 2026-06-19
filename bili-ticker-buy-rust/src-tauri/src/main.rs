@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use storage::{Account, HistoryItem, ProjectConfig};
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 use uuid::Uuid;
 
 struct AppState {
