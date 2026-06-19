@@ -1,12 +1,12 @@
-#[path = "../api.rs"]
+#[path = "api.rs"]
 mod api;
-#[path = "../auth.rs"]
+#[path = "auth.rs"]
 mod auth;
-#[path = "../buy.rs"]
+#[path = "buy.rs"]
 mod buy;
-#[path = "../storage.rs"]
+#[path = "storage.rs"]
 mod storage;
-#[path = "../util.rs"]
+#[path = "util.rs"]
 mod util;
 
 use buy::{TaskEmitter, TicketInfo};

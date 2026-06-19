@@ -4,7 +4,6 @@ version = "0.1.22"
 description = "A Bilibili ticket buying tool"
 authors = ["NekoMirra"]
 edition = "2021"
-default-run = "bili-ticker-buy-rust"
 
 [build-dependencies]
 tauri-build = { version = "1", features = [], optional = true }
@@ -29,14 +28,9 @@ sntpc = "0.3.5"
 tiny_http = "0.12.0"
 urlencoding = "2.1.3"
 
-[[bin]]
-name = "bili-ticker-buy-rust"
-path = "src/main.rs"
-required-features = ["desktop"]
-
-[[bin]]
+[[example]]
 name = "web"
-path = "src/bin/web.rs"
+path = "src/web.rs"
 required-features = ["web"]
 
 [features]

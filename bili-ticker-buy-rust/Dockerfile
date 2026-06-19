@@ -7,14 +7,14 @@ COPY src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/build.rs src-tauri/taur
 COPY src-tauri/icons ./icons
 COPY src-tauri/src ./src
 COPY dist ../dist
-RUN cargo build --release --no-default-features --features web --bin web
+RUN cargo build --release --no-default-features --features web --example web
 
 FROM debian:bookworm-slim
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /data
-COPY --from=api /app/src-tauri/target/release/web /usr/local/bin/bili-ticker-buy-web
+COPY --from=api /app/src-tauri/target/release/examples/web /usr/local/bin/bili-ticker-buy-web
 COPY dist ./dist
 ENV PORT=8080 WEB_DIST_DIR=/app/dist APP_DATA_DIR=/data
 EXPOSE 8080
