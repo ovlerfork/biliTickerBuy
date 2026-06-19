@@ -3,22 +3,22 @@
     windows_subsystem = "windows"
 )]
 
+mod api;
 mod auth;
 mod buy;
 mod config;
-mod api;
-mod util;
 mod storage;
+mod util;
 
 use buy::TicketInfo;
 use reqwest::Client;
-use storage::{Account, HistoryItem, ProjectConfig};
-use tauri::Manager;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use storage::{Account, HistoryItem, ProjectConfig};
+use tauri::Manager;
 use uuid::Uuid;
 
 struct AppState {
@@ -27,7 +27,10 @@ struct AppState {
 }
 
 fn get_app_dir(app_handle: &tauri::AppHandle) -> PathBuf {
-    let path = app_handle.path_resolver().app_config_dir().unwrap_or(PathBuf::from("."));
+    let path = app_handle
+        .path_resolver()
+        .app_config_dir()
+        .unwrap_or(PathBuf::from("."));
     if !path.exists() {
         let _ = fs::create_dir_all(&path);
     }
@@ -58,16 +61,22 @@ fn get_accounts(app_handle: tauri::AppHandle) -> Result<Vec<Account>, String> {
 }
 
 #[tauri::command]
-async fn add_account(state: tauri::State<'_, AppState>, app_handle: tauri::AppHandle, cookies: Vec<String>) -> Result<Account, String> {
+async fn add_account(
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+    cookies: Vec<String>,
+) -> Result<Account, String> {
     // Fetch user info to get uid, name, face
-    let res = api::fetch_user_info(&state.http_client, cookies.clone()).await.map_err(|e| e.to_string())?;
-    
+    let res = api::fetch_user_info(&state.http_client, cookies.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+
     if res["code"].as_i64().unwrap_or(-1) != 0 {
         return Err("Invalid cookies".to_string());
     }
 
     let data = &res["data"];
-    
+
     let level = data["level_info"]["current_level"].as_i64().unwrap_or(0) as i32;
     let is_vip = data["vipStatus"].as_i64().unwrap_or(0) == 1;
     let coins = data["money"].as_f64().unwrap_or(0.0);
@@ -86,7 +95,7 @@ async fn add_account(state: tauri::State<'_, AppState>, app_handle: tauri::AppHa
 
     // Load existing accounts
     let mut accounts = storage::get_accounts(&dir).map_err(|e| e.to_string())?;
-    
+
     // Remove existing if same uid
     accounts.retain(|a| a.uid != account.uid);
     accounts.push(account.clone());
@@ -137,39 +146,71 @@ fn add_project_history(app_handle: tauri::AppHandle, item: ProjectConfig) -> Res
 }
 
 #[tauri::command]
-fn remove_project_history(app_handle: tauri::AppHandle, project_id: String, sku_id: String) -> Result<(), String> {
+fn remove_project_history(
+    app_handle: tauri::AppHandle,
+    project_id: String,
+    sku_id: String,
+) -> Result<(), String> {
     let dir = get_app_dir(&app_handle);
     storage::remove_project_history_item(&dir, project_id, sku_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn get_user_info(state: tauri::State<'_, AppState>, cookies: Vec<String>) -> Result<serde_json::Value, String> {
-    api::fetch_user_info(&state.http_client, cookies).await.map_err(|e| e.to_string())
+async fn get_user_info(
+    state: tauri::State<'_, AppState>,
+    cookies: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    api::fetch_user_info(&state.http_client, cookies)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn get_login_qrcode(state: tauri::State<'_, AppState>) -> Result<(String, String), String> {
-    auth::generate_qrcode(&state.http_client).await.map_err(|e| e.to_string())
+    auth::generate_qrcode(&state.http_client)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn poll_login_status(state: tauri::State<'_, AppState>, qrcode_key: String) -> Result<String, String> {
-    auth::poll_login(&state.http_client, &qrcode_key).await.map_err(|e| e.to_string())
+async fn poll_login_status(
+    state: tauri::State<'_, AppState>,
+    qrcode_key: String,
+) -> Result<String, String> {
+    auth::poll_login(&state.http_client, &qrcode_key)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn fetch_project(state: tauri::State<'_, AppState>, id: String) -> Result<serde_json::Value, String> {
-    api::fetch_project_info(&state.http_client, id).await.map_err(|e| e.to_string())
+async fn fetch_project(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    api::fetch_project_info(&state.http_client, id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn fetch_buyer_list(state: tauri::State<'_, AppState>, project_id: String, cookies: Vec<String>) -> Result<serde_json::Value, String> {
-    api::fetch_buyers(&state.http_client, project_id, cookies).await.map_err(|e| e.to_string())
+async fn fetch_buyer_list(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+    cookies: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    api::fetch_buyers(&state.http_client, project_id, cookies)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn fetch_address_list(state: tauri::State<'_, AppState>, cookies: Vec<String>) -> Result<serde_json::Value, String> {
-    api::fetch_address_list(&state.http_client, cookies).await.map_err(|e| e.to_string())
+async fn fetch_address_list(
+    state: tauri::State<'_, AppState>,
+    cookies: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    api::fetch_address_list(&state.http_client, cookies)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -178,68 +219,85 @@ async fn sync_time(
     server_url: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let _ = server_url;
-    serde_json::to_value(api::sample_time(&state.http_client, api::DEFAULT_TIME_SERVER).await.map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())
+    serde_json::to_value(
+        api::sample_time(&state.http_client, api::DEFAULT_TIME_SERVER)
+            .await
+            .map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn start_buy(
     state: tauri::State<'_, AppState>,
-    window: tauri::Window, 
-    ticket_info: String, 
-    interval: u64, 
-    mode: u32, 
+    window: tauri::Window,
+    ticket_info: String,
+    interval: u64,
+    mode: u32,
     total_attempts: u32,
     time_start: Option<String>,
     proxy: Option<String>,
     time_offset: Option<f64>,
     buyers: Option<Vec<serde_json::Value>>,
-    ntp_server: Option<String>
+    ntp_server: Option<String>,
 ) -> Result<String, String> {
     // Filter out empty time_start
     let time_start = time_start.filter(|s| !s.trim().is_empty());
 
     let mut info: TicketInfo = serde_json::from_str(&ticket_info).map_err(|e| e.to_string())?;
-    
+
     // If buyers are provided from UI, override the one in ticket_info
     if let Some(b) = buyers {
         if !b.is_empty() {
             info.buyer_info = serde_json::Value::Array(b.clone());
 
             // Ensure contact info is present and not empty
-            let contact_name_missing = info.contact_name.as_ref().map(|s| s.is_empty()).unwrap_or(true);
-            let contact_tel_missing = info.contact_tel.as_ref().map(|s| s.is_empty()).unwrap_or(true);
+            let contact_name_missing = info
+                .contact_name
+                .as_ref()
+                .map(|s| s.is_empty())
+                .unwrap_or(true);
+            let contact_tel_missing = info
+                .contact_tel
+                .as_ref()
+                .map(|s| s.is_empty())
+                .unwrap_or(true);
 
             if contact_name_missing || contact_tel_missing {
-                 if let Some(first) = b.first() {
-                     if contact_name_missing {
-                         if let Some(name) = first["name"].as_str() {
-                             if !name.is_empty() {
-                                 info.contact_name = Some(name.to_string());
-                             }
-                         }
-                     }
-                     if contact_tel_missing {
-                         // Try different fields for phone
-                         let tel = first["tel"].as_str()
-                             .or(first["mobile"].as_str())
-                             .or(first["phone"].as_str());
-                         
-                         if let Some(t) = tel {
-                             if !t.is_empty() && !t.contains('*') {
-                                 info.contact_tel = Some(t.to_string());
-                             }
-                         }
-                     }
-                 }
+                if let Some(first) = b.first() {
+                    if contact_name_missing {
+                        if let Some(name) = first["name"].as_str() {
+                            if !name.is_empty() {
+                                info.contact_name = Some(name.to_string());
+                            }
+                        }
+                    }
+                    if contact_tel_missing {
+                        // Try different fields for phone
+                        let tel = first["tel"]
+                            .as_str()
+                            .or(first["mobile"].as_str())
+                            .or(first["phone"].as_str());
+
+                        if let Some(t) = tel {
+                            if !t.is_empty() && !t.contains('*') {
+                                info.contact_tel = Some(t.to_string());
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
     let task_id = Uuid::new_v4().to_string();
     let stop_flag = Arc::new(AtomicBool::new(false));
-    
-    state.tasks.lock().unwrap().insert(task_id.clone(), stop_flag.clone());
+
+    state
+        .tasks
+        .lock()
+        .unwrap()
+        .insert(task_id.clone(), stop_flag.clone());
 
     // Resolve app directory for the background task
     let app_dir = get_app_dir(&window.app_handle());
@@ -247,28 +305,50 @@ async fn start_buy(
     let task_id_clone = task_id.clone();
     let tasks_clone = state.tasks.clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = buy::start_buy_task(window, task_id_clone.clone(), stop_flag, info, interval, mode, total_attempts, time_start, proxy, time_offset, ntp_server, app_dir).await {
+        if let Err(e) = buy::start_buy_task(
+            window,
+            task_id_clone.clone(),
+            stop_flag,
+            info,
+            interval,
+            mode,
+            total_attempts,
+            time_start,
+            proxy,
+            time_offset,
+            ntp_server,
+            app_dir,
+        )
+        .await
+        {
             println!("Buy task error: {}", e);
         }
         // Clean up the task from AppState to prevent memory leak
         tasks_clone.lock().unwrap().remove(&task_id_clone);
     });
-    
+
     Ok(task_id)
 }
 
 #[tauri::command]
 async fn open_bilibili_home(app: tauri::AppHandle, cookies: Vec<String>) -> Result<(), String> {
-    let cookie_script = cookies.iter().map(|c| {
-        // Extract key=value from Set-Cookie string (which might contain attributes like HttpOnly)
-        let key_val = c.split(';').next().unwrap_or("").trim();
-        if !key_val.is_empty() {
-            format!("document.cookie = '{} ; domain=.bilibili.com; path=/';", key_val.replace("'", "\\'"))
-        } else {
-            String::new()
-        }
-    }).collect::<Vec<_>>().join("\n");
-    
+    let cookie_script = cookies
+        .iter()
+        .map(|c| {
+            // Extract key=value from Set-Cookie string (which might contain attributes like HttpOnly)
+            let key_val = c.split(';').next().unwrap_or("").trim();
+            if !key_val.is_empty() {
+                format!(
+                    "document.cookie = '{} ; domain=.bilibili.com; path=/';",
+                    key_val.replace("'", "\\'")
+                )
+            } else {
+                String::new()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
     let init_script = format!(
         "
         (function() {{
@@ -303,14 +383,18 @@ async fn open_bilibili_home(app: tauri::AppHandle, cookies: Vec<String>) -> Resu
     );
 
     let label = format!("bili_home_{}", Uuid::new_v4());
-    
+
     // Start at passport login to ensure we are on the correct domain for cookie setting
-    tauri::WindowBuilder::new(&app, label, tauri::WindowUrl::External("https://passport.bilibili.com/login".parse().unwrap()))
-        .title("Bilibili - 正在跳转...")
-        .initialization_script(&init_script)
-        .inner_size(1280.0, 800.0)
-        .build()
-        .map_err(|e| e.to_string())?;
+    tauri::WindowBuilder::new(
+        &app,
+        label,
+        tauri::WindowUrl::External("https://passport.bilibili.com/login".parse().unwrap()),
+    )
+    .title("Bilibili - 正在跳转...")
+    .initialization_script(&init_script)
+    .inner_size(1280.0, 800.0)
+    .build()
+    .map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -319,7 +403,10 @@ async fn open_bilibili_home(app: tauri::AppHandle, cookies: Vec<String>) -> Resu
 fn export_cookie(app_handle: tauri::AppHandle, uid: String, path: String) -> Result<(), String> {
     let dir = get_app_dir(&app_handle);
     let accounts = storage::get_accounts(&dir).map_err(|e| e.to_string())?;
-    let account = accounts.iter().find(|a| a.uid == uid).ok_or("Account not found")?;
+    let account = accounts
+        .iter()
+        .find(|a| a.uid == uid)
+        .ok_or("Account not found")?;
 
     let mut cookie_items = Vec::new();
     for c in &account.cookies {
@@ -350,12 +437,18 @@ fn export_cookie(app_handle: tauri::AppHandle, uid: String, path: String) -> Res
 }
 
 #[tauri::command]
-async fn import_cookie(state: tauri::State<'_, AppState>, app_handle: tauri::AppHandle, path: String) -> Result<(), String> {
+async fn import_cookie(
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+    path: String,
+) -> Result<(), String> {
     let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
     let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
 
-    let items = json["_default"]["1"]["value"].as_array().ok_or("Invalid format: missing _default.1.value")?;
-    
+    let items = json["_default"]["1"]["value"]
+        .as_array()
+        .ok_or("Invalid format: missing _default.1.value")?;
+
     let mut cookies = Vec::new();
     for item in items {
         let name = item["name"].as_str().unwrap_or("");
@@ -387,9 +480,9 @@ fn main() {
             http_client: api::build_shared_client().expect("failed to build shared HTTP client"),
         })
         .invoke_handler(tauri::generate_handler![
-            greet, 
-            get_login_qrcode, 
-            poll_login_status, 
+            greet,
+            get_login_qrcode,
+            poll_login_status,
             start_buy,
             stop_task,
             fetch_project,

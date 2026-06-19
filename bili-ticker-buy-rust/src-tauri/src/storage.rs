@@ -1,13 +1,16 @@
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use anyhow::{Result, Context};
 
 /// Atomically write content to a file by writing to a temp file first, then renaming.
 /// This prevents data corruption if the app crashes mid-write.
 fn atomic_write(path: &Path, content: &str) -> Result<()> {
     let parent = path.parent().unwrap_or(Path::new("."));
-    let temp_path = parent.join(format!("{}.tmp", path.file_name().unwrap_or_default().to_string_lossy()));
+    let temp_path = parent.join(format!(
+        "{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
     fs::write(&temp_path, content)
         .with_context(|| format!("Failed to write temp file: {:?}", temp_path))?;
     fs::rename(&temp_path, path)
@@ -106,14 +109,16 @@ pub fn get_project_history(base_dir: &Path) -> Result<Vec<ProjectConfig>> {
 
 pub fn add_project_history(base_dir: &Path, item: ProjectConfig) -> Result<()> {
     let mut history = get_project_history(base_dir)?;
-    
+
     if item.sku_id.is_empty() {
         // If adding a generic project entry (no SKU), remove any existing generic entry for same project
         history.retain(|p| !(p.project_id == item.project_id && p.sku_id.is_empty()));
-        // Don't add if a specific SKU entry exists? Or just add it? 
+        // Don't add if a specific SKU entry exists? Or just add it?
         // Logic from original code seemed to be: "If we have a specific one, maybe don't need generic one?"
         // Retaining logic:
-        let has_specific = history.iter().any(|p| p.project_id == item.project_id && !p.sku_id.is_empty());
+        let has_specific = history
+            .iter()
+            .any(|p| p.project_id == item.project_id && !p.sku_id.is_empty());
         if !has_specific {
             history.insert(0, item);
         }
@@ -134,7 +139,11 @@ pub fn add_project_history(base_dir: &Path, item: ProjectConfig) -> Result<()> {
     atomic_write(&path, &json)
 }
 
-pub fn remove_project_history_item(base_dir: &Path, project_id: String, sku_id: String) -> Result<()> {
+pub fn remove_project_history_item(
+    base_dir: &Path,
+    project_id: String,
+    sku_id: String,
+) -> Result<()> {
     let mut history = get_project_history(base_dir)?;
     history.retain(|p| !(p.project_id == project_id && p.sku_id == sku_id));
     let path = base_dir.join("project_history.json");

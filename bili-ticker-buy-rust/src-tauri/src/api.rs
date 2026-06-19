@@ -1,9 +1,9 @@
+use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde_json::{json, Value};
-use anyhow::{Result, anyhow};
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
-use std::net::UdpSocket;
 use sntpc;
+use std::net::UdpSocket;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_TIME_SERVER: &str = "ntp.aliyun.com";
 pub const TIME_SYNC_ATTEMPTS: usize = 3;
@@ -311,7 +311,10 @@ pub async fn fetch_project_info(client: &Client, id: String) -> Result<Value> {
     normalize_project_data(&mut res, &id);
 
     // Check for linked goods (场贩/周边)
-    let link_url = format!("https://show.bilibili.com/api/ticket/linkgoods/list?project_id={}&page_type=0", id);
+    let link_url = format!(
+        "https://show.bilibili.com/api/ticket/linkgoods/list?project_id={}&page_type=0",
+        id
+    );
     let link_res_result = client.get(&link_url)
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
         .send()
@@ -319,27 +322,29 @@ pub async fn fetch_project_info(client: &Client, id: String) -> Result<Value> {
 
     if let Ok(link_resp) = link_res_result {
         if let Ok(link_res) = link_resp.json::<Value>().await {
-             if let Some(list) = link_res["data"]["list"].as_array() {
+            if let Some(list) = link_res["data"]["list"].as_array() {
                 if !list.is_empty() {
                     // Ensure screen_list exists in original response
                     if res["data"]["screen_list"].as_array().is_none() {
-                         if let Some(data) = res["data"].as_object_mut() {
-                             data.insert("screen_list".to_string(), serde_json::json!([]));
-                         }
+                        if let Some(data) = res["data"].as_object_mut() {
+                            data.insert("screen_list".to_string(), serde_json::json!([]));
+                        }
                     }
-        
+
                     // Parallelize detail fetching
                     let mut tasks = Vec::new();
-                    
+
                     for item in list {
                         // Handle id as string or number
-                        let link_id_opt = item["id"].as_str().map(|s| s.to_string())
+                        let link_id_opt = item["id"]
+                            .as_str()
+                            .map(|s| s.to_string())
                             .or_else(|| item["id"].as_i64().map(|i| i.to_string()));
 
                         if let Some(link_id) = link_id_opt {
-                             let client_clone = client.clone();
-                             
-                             tasks.push(tokio::spawn(async move {
+                            let client_clone = client.clone();
+
+                            tasks.push(tokio::spawn(async move {
                                  let detail_url = format!("https://show.bilibili.com/api/ticket/linkgoods/detail?link_id={}", link_id);
                                  if let Ok(detail_resp) = client_clone.get(&detail_url)
                                     .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -358,18 +363,25 @@ pub async fn fetch_project_info(client: &Client, id: String) -> Result<Value> {
                     // Collect results
                     for task in tasks {
                         if let Ok(Some((detail_res, link_id))) = task.await {
-                             if let Some(specs) = detail_res["data"]["specs_list"].as_array() {
-                                if let Some(screen_list) = res["data"]["screen_list"].as_array_mut() {
+                            if let Some(specs) = detail_res["data"]["specs_list"].as_array() {
+                                if let Some(screen_list) = res["data"]["screen_list"].as_array_mut()
+                                {
                                     for spec in specs {
                                         let mut spec_obj = spec.clone();
                                         if let Some(obj) = spec_obj.as_object_mut() {
-                                            obj.insert("project_id".to_string(), detail_res["data"]["item_id"].clone()); // Use actual item_id from detail
-                                            obj.insert("link_id".to_string(), serde_json::json!(link_id));
+                                            obj.insert(
+                                                "project_id".to_string(),
+                                                detail_res["data"]["item_id"].clone(),
+                                            ); // Use actual item_id from detail
+                                            obj.insert(
+                                                "link_id".to_string(),
+                                                serde_json::json!(link_id),
+                                            );
                                         }
                                         screen_list.push(spec_obj);
                                     }
                                 }
-                             }
+                            }
                         }
                     }
                 }
@@ -379,8 +391,11 @@ pub async fn fetch_project_info(client: &Client, id: String) -> Result<Value> {
 
     // Apply express_fee logic (Match Python TicketService.py)
     if let Some(data) = res["data"].as_object_mut() {
-        let has_eticket = data.get("has_eticket").and_then(|v| v.as_bool()).unwrap_or(false);
-        
+        let has_eticket = data
+            .get("has_eticket")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         if let Some(screen_list) = data.get_mut("screen_list").and_then(|v| v.as_array_mut()) {
             for screen in screen_list {
                 let mut express_fee = 0;
@@ -391,8 +406,10 @@ pub async fn fetch_project_info(client: &Client, id: String) -> Result<Value> {
                         }
                     }
                 }
-                
-                if let Some(ticket_list) = screen.get_mut("ticket_list").and_then(|v| v.as_array_mut()) {
+
+                if let Some(ticket_list) =
+                    screen.get_mut("ticket_list").and_then(|v| v.as_array_mut())
+                {
                     for ticket in ticket_list {
                         if let Some(price) = ticket.get("price").and_then(|v| v.as_i64()) {
                             ticket["price"] = serde_json::json!(price + express_fee);
@@ -406,9 +423,16 @@ pub async fn fetch_project_info(client: &Client, id: String) -> Result<Value> {
     Ok(res)
 }
 
-pub async fn fetch_buyers(client: &Client, project_id: String, cookies: Vec<String>) -> Result<Value> {
-    let url = format!("https://show.bilibili.com/api/ticket/buyer/list?is_default&projectId={}", project_id);
-    
+pub async fn fetch_buyers(
+    client: &Client,
+    project_id: String,
+    cookies: Vec<String>,
+) -> Result<Value> {
+    let url = format!(
+        "https://show.bilibili.com/api/ticket/buyer/list?is_default&projectId={}",
+        project_id
+    );
+
     let mut req = client.get(&url)
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
 
@@ -422,7 +446,7 @@ pub async fn fetch_buyers(client: &Client, project_id: String, cookies: Vec<Stri
 
 pub async fn fetch_user_info(client: &Client, cookies: Vec<String>) -> Result<Value> {
     let url = "https://api.bilibili.com/x/web-interface/nav";
-    
+
     let mut req = client.get(url)
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
 
@@ -435,7 +459,7 @@ pub async fn fetch_user_info(client: &Client, cookies: Vec<String>) -> Result<Va
 
 pub async fn fetch_address_list(client: &Client, cookies: Vec<String>) -> Result<Value> {
     let url = "https://show.bilibili.com/api/ticket/addr/list";
-    
+
     let mut req = client.get(url)
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
 
@@ -448,7 +472,7 @@ pub async fn fetch_address_list(client: &Client, cookies: Vec<String>) -> Result
 
 pub async fn get_server_time(client: &Client, url_opt: Option<String>) -> Result<i64> {
     let url = url_opt.ok_or_else(|| anyhow!("HTTP time API URL is required"))?;
-    
+
     let res: Value = client.get(&url)
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
         .timeout(Duration::from_secs(3))
@@ -456,7 +480,7 @@ pub async fn get_server_time(client: &Client, url_opt: Option<String>) -> Result
         .await?
         .json()
         .await?;
-    
+
     // 1. Generic nested time: {"data": {"now": 169...}} (seconds or millis by magnitude)
     if let Some(t) = parse_data_now_to_millis(&res["data"]["now"]) {
         return Ok(t);
@@ -544,11 +568,15 @@ pub fn get_ntp_time(server: &str) -> Result<u64> {
         format!("{}:123", server)
     };
 
-    let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| anyhow::anyhow!("UDP Bind Error: {:?}", e))?;
-    socket.set_read_timeout(Some(Duration::from_secs(2))).map_err(|e| anyhow::anyhow!("UDP Timeout Error: {:?}", e))?;
+    let socket =
+        UdpSocket::bind("0.0.0.0:0").map_err(|e| anyhow::anyhow!("UDP Bind Error: {:?}", e))?;
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| anyhow::anyhow!("UDP Timeout Error: {:?}", e))?;
 
-    let result = sntpc::simple_get_time(&address, &socket).map_err(|e| anyhow::anyhow!("NTP Error: {:?}", e))?;
-    
+    let result = sntpc::simple_get_time(&address, &socket)
+        .map_err(|e| anyhow::anyhow!("NTP Error: {:?}", e))?;
+
     // Calculate milliseconds: seconds * 1000 + nanoseconds / 1_000_000
     let millis = (result.seconds as u64 * 1000) + ((result.seconds_fraction as u64 * 1000) >> 32);
     Ok(millis)
@@ -594,8 +622,14 @@ mod tests {
 
     #[test]
     fn parses_generic_seconds_and_millis() {
-        assert_eq!(parse_epoch_millis(&json!(1_690_000_000)), Some(1_690_000_000_000));
-        assert_eq!(parse_epoch_millis(&json!("1690000000123")), Some(1_690_000_000_123));
+        assert_eq!(
+            parse_epoch_millis(&json!(1_690_000_000)),
+            Some(1_690_000_000_000)
+        );
+        assert_eq!(
+            parse_epoch_millis(&json!("1690000000123")),
+            Some(1_690_000_000_123)
+        );
     }
 
     #[test]

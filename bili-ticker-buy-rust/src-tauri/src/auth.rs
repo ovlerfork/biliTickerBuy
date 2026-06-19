@@ -1,11 +1,12 @@
+use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde_json::Value;
 use std::time::Duration;
-use anyhow::{Result, anyhow};
 
 pub async fn generate_qrcode(client: &Client) -> Result<(String, String)> {
     let url = "https://passport.bilibili.com/x/passport-login/web/qrcode/generate";
-    let res: Value = client.get(url)
+    let res: Value = client
+        .get(url)
         .header("User-Agent", "Mozilla/5.0")
         .send()
         .await?
@@ -25,7 +26,8 @@ pub async fn poll_login(client: &Client, qrcode_key: &str) -> Result<String> {
     let url = "https://passport.bilibili.com/x/passport-login/web/qrcode/poll";
 
     for _ in 0..120 {
-        let resp = client.get(url)
+        let resp = client
+            .get(url)
             .query(&[("qrcode_key", qrcode_key)])
             .header("User-Agent", "Mozilla/5.0")
             .send()

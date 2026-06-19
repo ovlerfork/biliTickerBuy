@@ -1,18 +1,18 @@
-use tauri::Window;
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use reqwest::{Client, Proxy, Url};
-use reqwest::cookie::Jar;
-use std::time::{Duration, Instant};
-use tokio::time::sleep;
-use crate::util::CTokenGenerator;
-use crate::storage::{self, HistoryItem};
 use crate::api; // Import api module
+use crate::storage::{self, HistoryItem};
+use crate::util::CTokenGenerator;
 use anyhow::Result;
-use log::info;
-use serde_json::json;
 use chrono::{FixedOffset, Local};
+use log::info;
+use reqwest::cookie::Jar;
+use reqwest::{Client, Proxy, Url};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tauri::Window;
+use tokio::time::sleep;
 
 const BEIJING_OFFSET_SECONDS: i32 = 8 * 60 * 60;
 const TIME_SYNC_FREEZE_BEFORE_START_MS: i64 = 2000;
@@ -49,7 +49,7 @@ pub struct TicketInfo {
     pub count: u32,
     pub buyer_info: serde_json::Value,
     pub deliver_info: serde_json::Value,
-    pub cookies: Vec<String>, 
+    pub cookies: Vec<String>,
     pub is_hot_project: Option<bool>,
     pub pay_money: Option<u32>,
     pub contact_name: Option<String>,
@@ -76,10 +76,13 @@ struct TaskResultPayload {
 }
 
 fn emit_log(window: &Window, task_id: &str, message: &str) {
-    let _ = window.emit("log", LogPayload { 
-        task_id: task_id.to_string(), 
-        message: message.to_string() 
-    });
+    let _ = window.emit(
+        "log",
+        LogPayload {
+            task_id: task_id.to_string(),
+            message: message.to_string(),
+        },
+    );
     info!("[{}] {}", task_id, message);
 }
 
@@ -139,12 +142,12 @@ async fn wait_until_task_time(
 }
 
 pub async fn start_buy_task(
-    window: Window, 
+    window: Window,
     task_id: String,
     stop_flag: Arc<AtomicBool>,
-    mut info: TicketInfo, 
-    interval: u64, 
-    mode: u32, 
+    mut info: TicketInfo,
+    interval: u64,
+    mode: u32,
     total_attempts: u32,
     time_start: Option<String>,
     proxy: Option<String>,
@@ -163,11 +166,11 @@ pub async fn start_buy_task(
 
     let jar = Arc::new(Jar::default());
     let url = "https://show.bilibili.com".parse::<Url>().unwrap();
-    
+
     // Parse cookies
     for cookie_str in &info.cookies {
         for part in cookie_str.split(';') {
-             jar.add_cookie_str(part.trim(), &url);
+            jar.add_cookie_str(part.trim(), &url);
         }
     }
 
@@ -189,10 +192,10 @@ pub async fn start_buy_task(
     let client = client_builder.build()?;
     let current_offset = Arc::new(AtomicI64::new(time_offset.unwrap_or(0.0) as i64));
     let mut scheduled_target = None;
-    
+
     if let Some(ts) = &time_start {
         emit_log(&window, &task_id, &format!("Scheduled start time: {}", ts));
-        
+
         let target_time = parse_beijing_time(ts);
 
         if let Some(target) = target_time {
@@ -209,10 +212,14 @@ pub async fn start_buy_task(
                 let sync_interval = Duration::from_secs(10);
                 let mut pending_offset: Option<i64> = None;
                 loop {
-                    if stop_flag_clone.load(Ordering::Relaxed) { break; }
+                    if stop_flag_clone.load(Ordering::Relaxed) {
+                        break;
+                    }
                     sleep(sync_interval).await;
 
-                    if remaining_ms_until(&target_for_sync, offset_clone.as_ref()) <= TIME_SYNC_FREEZE_BEFORE_START_MS {
+                    if remaining_ms_until(&target_for_sync, offset_clone.as_ref())
+                        <= TIME_SYNC_FREEZE_BEFORE_START_MS
+                    {
                         break;
                     }
 
@@ -222,12 +229,22 @@ pub async fn start_buy_task(
                             let old_offset = offset_clone.load(Ordering::Relaxed);
                             if (new_offset - old_offset).abs() > TIME_SYNC_OFFSET_JUMP_WARN_MS {
                                 if pending_offset
-                                    .map(|pending| (new_offset - pending).abs() <= TIME_SYNC_OFFSET_JUMP_WARN_MS)
+                                    .map(|pending| {
+                                        (new_offset - pending).abs()
+                                            <= TIME_SYNC_OFFSET_JUMP_WARN_MS
+                                    })
                                     .unwrap_or(false)
                                 {
                                     offset_clone.store(new_offset, Ordering::Relaxed);
                                     pending_offset = None;
-                                    emit_log(&window_clone, &task_id_clone, &format!("Background sync accepted offset jump: {}ms", new_offset));
+                                    emit_log(
+                                        &window_clone,
+                                        &task_id_clone,
+                                        &format!(
+                                            "Background sync accepted offset jump: {}ms",
+                                            new_offset
+                                        ),
+                                    );
                                 } else {
                                     pending_offset = Some(new_offset);
                                     emit_log(&window_clone, &task_id_clone, &format!("Background sync offset jump ignored once: {}ms -> {}ms", old_offset, new_offset));
@@ -236,20 +253,28 @@ pub async fn start_buy_task(
                                 offset_clone.store(new_offset, Ordering::Relaxed);
                                 pending_offset = None;
                             }
-                        },
+                        }
                         Err(e) => {
-                             emit_log(&window_clone, &task_id_clone, &format!("Background sync failed: {}", e));
+                            emit_log(
+                                &window_clone,
+                                &task_id_clone,
+                                &format!("Background sync failed: {}", e),
+                            );
                         }
                     }
                 }
             });
             let preheat_time = target.clone() - chrono::Duration::minutes(3);
-            emit_log(&window, &task_id, &format!(
-                "Waiting until preheat: {} (Sale time: {}, Initial Offset: {}ms)",
-                preheat_time.format("%Y-%m-%d %H:%M:%S%.3f"),
-                target.format("%Y-%m-%d %H:%M:%S%.3f"),
-                initial_offset
-            ));
+            emit_log(
+                &window,
+                &task_id,
+                &format!(
+                    "Waiting until preheat: {} (Sale time: {}, Initial Offset: {}ms)",
+                    preheat_time.format("%Y-%m-%d %H:%M:%S%.3f"),
+                    target.format("%Y-%m-%d %H:%M:%S%.3f"),
+                    initial_offset
+                ),
+            );
 
             if !wait_until_task_time(
                 &window,
@@ -258,22 +283,34 @@ pub async fn start_buy_task(
                 current_offset.as_ref(),
                 &preheat_time,
                 "Task stopped by user while waiting for preheat.",
-            ).await {
+            )
+            .await
+            {
                 return Ok(());
             }
 
-            emit_log(&window, &task_id, "Preheat time reached! Preparing order...");
+            emit_log(
+                &window,
+                &task_id,
+                "Preheat time reached! Preparing order...",
+            );
             scheduled_target = Some(target);
         } else {
-             emit_log(&window, &task_id, "Invalid time format. Starting immediately.");
+            emit_log(
+                &window,
+                &task_id,
+                "Invalid time format. Starting immediately.",
+            );
         }
     }
 
     let is_hot = info.is_hot_project.unwrap_or(false);
     let mut ctoken_gen = CTokenGenerator::new(
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs(),
         0,
-        rand::random::<u64>() % 8000 + 2000
+        rand::random::<u64>() % 8000 + 2000,
     );
 
     let mut token_payload = json!({
@@ -294,7 +331,10 @@ pub async fn start_buy_task(
     let mut is_running = true;
 
     // Generate static device ID for this task
-    let device_id = format!("{:x}", md5::compute(format!("{}{}", task_id, rand::random::<u64>())));
+    let device_id = format!(
+        "{:x}",
+        md5::compute(format!("{}{}", task_id, rand::random::<u64>()))
+    );
 
     while is_running {
         if stop_flag.load(Ordering::Relaxed) {
@@ -303,42 +343,69 @@ pub async fn start_buy_task(
         }
 
         emit_log(&window, &task_id, "1) Preparing order...");
-        
+
         if is_hot {
             token_payload["token"] = json!(ctoken_gen.generate_ctoken(false));
         } else {
             token_payload["token"] = json!("");
         }
 
-        let prepare_url = format!("https://show.bilibili.com/api/ticket/order/prepare?project_id={}", info.project_id);
-        let prepare_started_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64;
-        let res = client.post(&prepare_url)
+        let prepare_url = format!(
+            "https://show.bilibili.com/api/ticket/order/prepare?project_id={}",
+            info.project_id
+        );
+        let prepare_started_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis() as u64;
+        let res = client
+            .post(&prepare_url)
             .json(&token_payload)
             .send()
             .await?;
-        
+
         let res_json: serde_json::Value = res.json().await?;
 
-        if res_json["errno"].as_i64().unwrap_or(-1) != 0 && res_json["code"].as_i64().unwrap_or(-1) != 0 {
-            let errno = res_json["errno"].as_i64().or(res_json["code"].as_i64()).unwrap_or(-1);
+        if res_json["errno"].as_i64().unwrap_or(-1) != 0
+            && res_json["code"].as_i64().unwrap_or(-1) != 0
+        {
+            let errno = res_json["errno"]
+                .as_i64()
+                .or(res_json["code"].as_i64())
+                .unwrap_or(-1);
             let before_sale = scheduled_target
                 .as_ref()
                 .map(|target| remaining_ms_until(target, current_offset.as_ref()) > 0)
                 .unwrap_or(false);
 
-            emit_log(&window, &task_id, &format!("Prepare failed: {} ({}) | Msg: {}", errno, get_error_message(errno), res_json["msg"]));
+            emit_log(
+                &window,
+                &task_id,
+                &format!(
+                    "Prepare failed: {} ({}) | Msg: {}",
+                    errno,
+                    get_error_message(errno),
+                    res_json["msg"]
+                ),
+            );
             sleep(Duration::from_millis(interval)).await;
             if mode == 1 && !before_sale {
                 left_time -= 1;
                 if left_time <= 0 {
                     is_running = false;
                     emit_log(&window, &task_id, "Total attempts reached. Stopping.");
-                    if let Err(e) = window.emit("task_result", TaskResultPayload {
-                        task_id: task_id.clone(),
-                        success: false,
-                        message: "达到最大尝试次数，任务停止".to_string()
-                    }) {
-                        emit_log(&window, &task_id, &format!("Warning: Failed to emit task result: {}", e));
+                    if let Err(e) = window.emit(
+                        "task_result",
+                        TaskResultPayload {
+                            task_id: task_id.clone(),
+                            success: false,
+                            message: "达到最大尝试次数，任务停止".to_string(),
+                        },
+                    ) {
+                        emit_log(
+                            &window,
+                            &task_id,
+                            &format!("Warning: Failed to emit task result: {}", e),
+                        );
                     }
                 }
             }
@@ -346,11 +413,21 @@ pub async fn start_buy_task(
         }
 
         let token = res_json["data"]["token"].as_str().unwrap_or("").to_string();
-        let ptoken = res_json["data"]["ptoken"].as_str().unwrap_or("").replace('=', "");
+        let ptoken = res_json["data"]["ptoken"]
+            .as_str()
+            .unwrap_or("")
+            .replace('=', "");
 
         if let Some(target) = &scheduled_target {
             if remaining_ms_until(target, current_offset.as_ref()) > 0 {
-                emit_log(&window, &task_id, &format!("Preheat complete. Waiting until sale time: {}", target.format("%Y-%m-%d %H:%M:%S%.3f")));
+                emit_log(
+                    &window,
+                    &task_id,
+                    &format!(
+                        "Preheat complete. Waiting until sale time: {}",
+                        target.format("%Y-%m-%d %H:%M:%S%.3f")
+                    ),
+                );
 
                 if !wait_until_task_time(
                     &window,
@@ -359,18 +436,22 @@ pub async fn start_buy_task(
                     current_offset.as_ref(),
                     target,
                     "Task stopped by user while waiting for sale time.",
-                ).await {
+                )
+                .await
+                {
                     return Ok(());
                 }
 
                 emit_log(&window, &task_id, "Time reached! Starting execution...");
             }
         }
-        
+
         emit_log(&window, &task_id, "2) Creating order...");
-        
+
         // Prepare create payload
-        let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis() as u64;
         let mut create_payload = json!({
             "project_id": info.project_id,
             "screen_id": info.screen_id,
@@ -393,37 +474,49 @@ pub async fn start_buy_task(
 
         // Add contact info
         if let Some(name) = &info.contact_name {
-             create_payload["contact_name"] = json!(name);
-             create_payload["buyer"] = json!(name);
+            create_payload["contact_name"] = json!(name);
+            create_payload["buyer"] = json!(name);
         }
         if let Some(tel) = &info.contact_tel {
-             if !tel.contains('*') {
-                 create_payload["contact_tel"] = json!(tel);
-                 create_payload["tel"] = json!(tel);
-             }
+            if !tel.contains('*') {
+                create_payload["contact_tel"] = json!(tel);
+                create_payload["tel"] = json!(tel);
+            }
         }
 
         let mut success = false;
-        
+
         // Use user-provided total_attempts, default to 60 if 0 passed accidentally
-        let max_attempts = if total_attempts > 0 { total_attempts } else { 60 };
+        let max_attempts = if total_attempts > 0 {
+            total_attempts
+        } else {
+            60
+        };
 
         for attempt in 1..=max_attempts {
-            if !is_running { break; }
+            if !is_running {
+                break;
+            }
             if stop_flag.load(Ordering::Relaxed) {
                 emit_log(&window, &task_id, "Task stopped by user.");
                 is_running = false;
                 break;
             }
-            
+
             let should_log_attempt = attempt == 1 || attempt == max_attempts || attempt % 10 == 0;
-            let mut create_url = format!("https://show.bilibili.com/api/ticket/order/createV2?project_id={}", info.project_id);
-            
+            let mut create_url = format!(
+                "https://show.bilibili.com/api/ticket/order/createV2?project_id={}",
+                info.project_id
+            );
+
             if is_hot {
-                let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64;
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_millis() as u64;
                 create_payload["ctoken"] = json!(ctoken_gen.generate_ctoken(true));
                 create_payload["ptoken"] = json!(ptoken);
-                create_payload["orderCreateUrl"] = json!("https://show.bilibili.com/api/ticket/order/createV2");
+                create_payload["orderCreateUrl"] =
+                    json!("https://show.bilibili.com/api/ticket/order/createV2");
                 create_payload["clickPosition"] = json!({
                     "x": rand::random::<u64>() % 501 + 400,
                     "y": rand::random::<u64>() % 501 + 400,
@@ -434,18 +527,29 @@ pub async fn start_buy_task(
             }
 
             let start = Instant::now();
-            let res = client.post(&create_url)
-                .json(&create_payload)
-                .send()
-                .await;
+            let res = client.post(&create_url).json(&create_payload).send().await;
 
             match res {
                 Ok(r) => {
                     let r_json: serde_json::Value = r.json().await.unwrap_or(json!({}));
-                    let errno = r_json["errno"].as_i64().or(r_json["code"].as_i64()).unwrap_or(-1);
-                    
+                    let errno = r_json["errno"]
+                        .as_i64()
+                        .or(r_json["code"].as_i64())
+                        .unwrap_or(-1);
+
                     if should_log_attempt {
-                        emit_log(&window, &task_id, &format!("[Attempt {}/{}] Code: {} ({}) | Msg: {}", attempt, max_attempts, errno, get_error_message(errno), r_json["msg"]));
+                        emit_log(
+                            &window,
+                            &task_id,
+                            &format!(
+                                "[Attempt {}/{}] Code: {} ({}) | Msg: {}",
+                                attempt,
+                                max_attempts,
+                                errno,
+                                get_error_message(errno),
+                                r_json["msg"]
+                            ),
+                        );
                     }
 
                     if errno == 0 || errno == 100048 || errno == 100079 {
@@ -459,13 +563,27 @@ pub async fn start_buy_task(
                         };
 
                         if order_id.is_empty() {
-                            emit_log(&window, &task_id, &format!("Existing order state reached without order id: {}", r_json["msg"]));
-                            if let Err(e) = window.emit("task_result", TaskResultPayload {
-                                task_id: task_id.clone(),
-                                success: true,
-                                message: format!("已有订单，停止重试: {}", r_json["msg"])
-                            }) {
-                                emit_log(&window, &task_id, &format!("Warning: Failed to emit task result: {}", e));
+                            emit_log(
+                                &window,
+                                &task_id,
+                                &format!(
+                                    "Existing order state reached without order id: {}",
+                                    r_json["msg"]
+                                ),
+                            );
+                            if let Err(e) = window.emit(
+                                "task_result",
+                                TaskResultPayload {
+                                    task_id: task_id.clone(),
+                                    success: true,
+                                    message: format!("已有订单，停止重试: {}", r_json["msg"]),
+                                },
+                            ) {
+                                emit_log(
+                                    &window,
+                                    &task_id,
+                                    &format!("Warning: Failed to emit task result: {}", e),
+                                );
                             }
                             break;
                         }
@@ -475,20 +593,37 @@ pub async fn start_buy_task(
                         emit_log(&window, &task_id, &format!("Order ID: {}", order_id));
 
                         let mut pay_url_str = "".to_string();
-                        let pay_url_api = format!("https://show.bilibili.com/api/ticket/order/getPayParam?order_id={}", order_id);
+                        let pay_url_api = format!(
+                            "https://show.bilibili.com/api/ticket/order/getPayParam?order_id={}",
+                            order_id
+                        );
 
                         if let Ok(pay_res) = client.get(&pay_url_api).send().await {
                             if let Ok(pay_json) = pay_res.json::<serde_json::Value>().await {
                                 if let Some(code_url) = pay_json["data"]["code_url"].as_str() {
                                     pay_url_str = code_url.to_string();
-                                    if let Err(e) = window.emit("payment_qrcode", PaymentPayload {
-                                        task_id: task_id.clone(),
-                                        url: code_url.to_string()
-                                    }) {
-                                        emit_log(&window, &task_id, &format!("Warning: Failed to emit payment event: {}", e));
+                                    if let Err(e) = window.emit(
+                                        "payment_qrcode",
+                                        PaymentPayload {
+                                            task_id: task_id.clone(),
+                                            url: code_url.to_string(),
+                                        },
+                                    ) {
+                                        emit_log(
+                                            &window,
+                                            &task_id,
+                                            &format!(
+                                                "Warning: Failed to emit payment event: {}",
+                                                e
+                                            ),
+                                        );
                                     }
                                 } else {
-                                    emit_log(&window, &task_id, &format!("Failed to get payment URL: {:?}", pay_json));
+                                    emit_log(
+                                        &window,
+                                        &task_id,
+                                        &format!("Failed to get payment URL: {:?}", pay_json),
+                                    );
                                 }
                             }
                         }
@@ -496,21 +631,35 @@ pub async fn start_buy_task(
                         // Save to history regardless of payment URL
                         let history_item = HistoryItem {
                             order_id: order_id.to_string(),
-                            project_name: info.project_name.clone().unwrap_or(info.project_id.clone()),
+                            project_name: info
+                                .project_name
+                                .clone()
+                                .unwrap_or(info.project_id.clone()),
                             price: info.pay_money.unwrap_or(0),
                             time: beijing_now().format("%Y-%m-%d %H:%M:%S").to_string(),
                             pay_url: pay_url_str,
                         };
                         if let Err(e) = storage::add_history_item(&base_dir, history_item) {
-                            emit_log(&window, &task_id, &format!("Warning: Failed to save history: {}", e));
+                            emit_log(
+                                &window,
+                                &task_id,
+                                &format!("Warning: Failed to save history: {}", e),
+                            );
                         }
-                        
-                        if let Err(e) = window.emit("task_result", TaskResultPayload {
-                            task_id: task_id.clone(),
-                            success: true,
-                            message: format!("抢票成功！订单号: {}", order_id)
-                        }) {
-                            emit_log(&window, &task_id, &format!("Warning: Failed to emit task result: {}", e));
+
+                        if let Err(e) = window.emit(
+                            "task_result",
+                            TaskResultPayload {
+                                task_id: task_id.clone(),
+                                success: true,
+                                message: format!("抢票成功！订单号: {}", order_id),
+                            },
+                        ) {
+                            emit_log(
+                                &window,
+                                &task_id,
+                                &format!("Warning: Failed to emit task result: {}", e),
+                            );
                         }
                         break;
                     }
@@ -518,20 +667,31 @@ pub async fn start_buy_task(
                     if errno == 100034 {
                         // Price changed
                         if let Some(new_price) = r_json["data"]["pay_money"].as_u64() {
-                            emit_log(&window, &task_id, &format!("Price updated to: {}", new_price));
+                            emit_log(
+                                &window,
+                                &task_id,
+                                &format!("Price updated to: {}", new_price),
+                            );
                             info.pay_money = Some(new_price as u32);
                             create_payload["pay_money"] = json!(new_price);
                         }
                     }
-                    
+
                     if errno == 100051 {
                         // Token expired
                         break;
                     }
-                },
+                }
                 Err(e) => {
                     if should_log_attempt {
-                        emit_log(&window, &task_id, &format!("[Attempt {}/{}] Request error: {}", attempt, max_attempts, e));
+                        emit_log(
+                            &window,
+                            &task_id,
+                            &format!(
+                                "[Attempt {}/{}] Request error: {}",
+                                attempt, max_attempts, e
+                            ),
+                        );
                     }
                 }
             }
@@ -554,18 +714,29 @@ pub async fn start_buy_task(
         if success {
             is_running = false;
         } else {
-            emit_log(&window, &task_id, "Retry attempts exhausted or token expired. Restarting loop...");
+            emit_log(
+                &window,
+                &task_id,
+                "Retry attempts exhausted or token expired. Restarting loop...",
+            );
             if mode == 1 {
                 left_time -= 1;
                 if left_time <= 0 {
                     is_running = false;
                     emit_log(&window, &task_id, "Total attempts reached. Stopping.");
-                    if let Err(e) = window.emit("task_result", TaskResultPayload {
-                        task_id: task_id.clone(),
-                        success: false,
-                        message: "达到最大尝试次数，任务停止".to_string()
-                    }) {
-                        emit_log(&window, &task_id, &format!("Warning: Failed to emit task result: {}", e));
+                    if let Err(e) = window.emit(
+                        "task_result",
+                        TaskResultPayload {
+                            task_id: task_id.clone(),
+                            success: false,
+                            message: "达到最大尝试次数，任务停止".to_string(),
+                        },
+                    ) {
+                        emit_log(
+                            &window,
+                            &task_id,
+                            &format!("Warning: Failed to emit task result: {}", e),
+                        );
                     }
                 }
             }
