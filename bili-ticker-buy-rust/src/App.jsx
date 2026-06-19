@@ -1,9 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { invoke } from "@tauri-apps/api/tauri";
-import { getVersion } from '@tauri-apps/api/app';
-import { open as openShell } from '@tauri-apps/api/shell';
-import { listen } from "@tauri-apps/api/event";
-import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/api/notification";
+import { invoke, getVersion, listen, isPermissionGranted, requestPermission, sendNotification, isWeb } from "./backend";
 import { Play, Settings, User, FileJson, Terminal, Clock, Bell, Network, Volume2, LogOut, RefreshCw, Search, CheckSquare, Square, Trash2, Plus, History, X, List, Save, Copy, Crown, ExternalLink, Upload, Download, Github, LayoutDashboard, Rocket, RotateCw } from "lucide-react";
 import { QRCodeCanvas } from "qrcode.react";
 import logo from "./assets/logo.png";
@@ -1557,6 +1553,14 @@ function App() {
         }
     }
 
+    async function openBilibiliHome(cookies) {
+        if (isWeb) {
+            window.open("https://www.bilibili.com", "_blank", "noopener,noreferrer");
+            return;
+        }
+        await invoke("open_bilibili_home", { cookies });
+    }
+
     return (
         <div className="flex h-screen bg-gray-900 text-white overflow-hidden">
             {/* Sidebar */}
@@ -2802,7 +2806,7 @@ function App() {
                                                     <Download size={18} />
                                                 </button>
                                                 <button
-                                                    onClick={() => invoke("open_bilibili_home", { cookies: acc.cookies })}
+                                                    onClick={() => openBilibiliHome(acc.cookies)}
                                                     className="p-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg"
                                                     title="进入首页 (已登录)"
                                                 >

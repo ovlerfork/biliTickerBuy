@@ -45,3 +45,29 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
       working-directory: ./bili-ticker-buy-rust/src-tauri
+
+  docker-build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+
+    - name: setup pnpm
+      uses: pnpm/action-setup@v4
+      with:
+        version: 9
+
+    - name: Build Web UI
+      run: |
+        pnpm install --frozen-lockfile
+        pnpm build
+      working-directory: ./bili-ticker-buy-rust
+
+    - name: Build Docker image
+      run: docker build -t bili-ticker-buy-rust-web:ci .
+      working-directory: ./bili-ticker-buy-rust
