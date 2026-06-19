@@ -12,10 +12,11 @@ use crate::api; // Import api module
 use anyhow::Result;
 use log::info;
 use serde_json::json;
-use chrono::Local;
+use chrono::{FixedOffset, Local};
 
 const TIME_SYNC_FREEZE_BEFORE_START_MS: i64 = 2000;
 const TIME_SYNC_OFFSET_JUMP_WARN_MS: i64 = 300;
+const BEIJING_OFFSET_SECONDS: i32 = 8 * 60 * 60;
 
 /// Error code dictionary from the original Python project
 /// Maps error codes to human-readable messages
@@ -82,6 +83,23 @@ fn emit_log(window: &Window, task_id: &str, message: &str) {
     info!("[{}] {}", task_id, message);
 }
 
+fn beijing_offset() -> FixedOffset {
+    FixedOffset::east_opt(BEIJING_OFFSET_SECONDS).unwrap()
+}
+
+fn beijing_now() -> chrono::DateTime<FixedOffset> {
+    Local::now().with_timezone(&beijing_offset())
+}
+
+fn parse_beijing_time(ts: &str) -> Option<chrono::DateTime<FixedOffset>> {
+    for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"] {
+        if let Ok(t) = chrono::NaiveDateTime::parse_from_str(ts, fmt) {
+            return t.and_local_timezone(beijing_offset()).single();
+        }
+    }
+    None
+}
+
 pub async fn start_buy_task(
     window: Window, 
     task_id: String,
@@ -135,15 +153,7 @@ pub async fn start_buy_task(
     if let Some(ts) = &time_start {
         emit_log(&window, &task_id, &format!("Scheduled start time: {}", ts));
         
-        // Parse start time
-        // Try different formats
-        let target_time = if let Ok(t) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S") {
-            Some(t.and_local_timezone(Local).unwrap())
-        } else if let Ok(t) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S") {
-            Some(t.and_local_timezone(Local).unwrap())
-        } else {
-            None
-        };
+        let target_time = parse_beijing_time(ts);
 
         if let Some(target) = target_time {
             let initial_offset = time_offset.unwrap_or(0.0) as i64;
@@ -164,7 +174,7 @@ pub async fn start_buy_task(
                     if stop_flag_clone.load(Ordering::Relaxed) { break; }
                     sleep(sync_interval).await;
 
-                    let now = Local::now();
+                    let now = beijing_now();
                     let offset_val = offset_clone.load(Ordering::Relaxed);
                     let target_with_offset = target_for_sync - chrono::Duration::milliseconds(offset_val);
                     let remaining_ms = (target_with_offset - now).num_milliseconds();
@@ -210,7 +220,7 @@ pub async fn start_buy_task(
                     return Ok(());
                 }
 
-                let now = Local::now();
+                let now = beijing_now();
                 let offset_val = current_offset.load(Ordering::Relaxed);
                 let target_with_offset = target - chrono::Duration::milliseconds(offset_val);
                 

@@ -20,6 +20,25 @@ const appendLogLine = (lines, line) => [...lines, line].slice(-LOG_BUFFER_LIMIT)
 const logTime = (log) => typeof log === "string" ? "" : log.time;
 const logMessage = (log) => typeof log === "string" ? log : log.message;
 const normalizeTimeServer = (server) => server === BILIBILI_SECONDS_TIME_API ? DEFAULT_TIME_SERVER : server;
+const BEIJING_TIME_FORMAT = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+});
+const formatBeijingDateTime = (date) => BEIJING_TIME_FORMAT
+    .format(date)
+    .replace(/\//g, "-")
+    .replace(",", "");
+const formatBeijingTimeWithMs = (date) => {
+    const time = formatBeijingDateTime(date).split(" ")[1];
+    return `${time}.${date.getMilliseconds().toString().padStart(3, "0")}`;
+};
+const formatBeijingTime = (date) => formatBeijingDateTime(date).split(" ")[1];
 const getSyncQualityIssue = (quality) => {
     if (!quality) return null;
     if (Number(quality.sample_count || 0) < 2) return "有效时间样本不足";
@@ -260,13 +279,7 @@ function App() {
 
     const syncedServerDate = getSyncedServerDate();
 
-    const formatLocalTimeWithMs = (date) => {
-        const h = date.getHours().toString().padStart(2, '0');
-        const m = date.getMinutes().toString().padStart(2, '0');
-        const s = date.getSeconds().toString().padStart(2, '0');
-        const ms = date.getMilliseconds().toString().padStart(3, '0');
-        return `${h}:${m}:${s}.${ms}`;
-    };
+    const formatLocalTimeWithMs = formatBeijingTimeWithMs;
 
     useEffect(() => {
         const saved = localStorage.getItem("bili_recent_inputs");
@@ -381,7 +394,7 @@ function App() {
 
         const unlistenLog = listen("log", (event) => {
             const { task_id, message } = event.payload;
-            const timestamp = new Date().toLocaleTimeString();
+            const timestamp = formatBeijingTime(new Date());
             if (task_id) {
                 queueTaskLog(task_id, { time: timestamp, message });
             } else {
@@ -672,9 +685,7 @@ function App() {
                 // Auto-set start time if available
                 if (response.data.sale_start) {
                     // Convert timestamp to YYYY-MM-DD HH:MM:SS
-                    const date = new Date(response.data.sale_start * 1000);
-                    const formatted = date.toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-');
-                    setTimeStart(formatted);
+                    setTimeStart(formatBeijingDateTime(new Date(response.data.sale_start * 1000)));
                 } else if (response.data.sale_start_str) {
                     setTimeStart(response.data.sale_start_str);
                 }
@@ -725,8 +736,7 @@ function App() {
             let timeStr = sku.sale_start;
             // If it's a timestamp (number), convert it.
             if (typeof timeStr === 'number') {
-                const date = new Date(timeStr * 1000);
-                timeStr = date.toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-');
+                timeStr = formatBeijingDateTime(new Date(timeStr * 1000));
             }
             if (timeStr) {
                 setTimeStart(timeStr);
@@ -956,14 +966,7 @@ function App() {
         }
     }
 
-    // Helper to format time with milliseconds
-    const formatTimeWithMs = (date) => {
-        const h = date.getHours().toString().padStart(2, '0');
-        const m = date.getMinutes().toString().padStart(2, '0');
-        const s = date.getSeconds().toString().padStart(2, '0');
-        const ms = date.getMilliseconds().toString().padStart(3, '0');
-        return `${h}:${m}:${s}.${ms}`;
-    };
+    const formatTimeWithMs = formatBeijingTimeWithMs;
 
     function toggleBuyer(buyer) {
         const buyerId = String(buyer.id);
@@ -1254,7 +1257,7 @@ function App() {
                     sku: selectedSku?.desc || "Default",
                     buyerCount: selectedBuyers.length,
                     buyers: selectedBuyers, // Store all buyers
-                    startTime: timeStart || new Date().toLocaleTimeString(),
+                    startTime: timeStart || formatBeijingTime(new Date()),
                     status: timeStart ? "scheduled" : "running",
                     logs: [syncLog],
                     lastLog: timeStart ? `Waiting for ${timeStart}` : `Starting for ${selectedBuyers.length} buyers...`,
@@ -1331,7 +1334,7 @@ function App() {
             const runningTask = {
                 ...task,
                 id: taskId,
-                startTime: new Date().toLocaleTimeString(),
+                startTime: formatBeijingTime(new Date()),
                 status: "running",
                 lastLog: "Starting...",
                 logs: []
@@ -1671,7 +1674,7 @@ function App() {
                                 <div className="bg-gray-800 rounded-2xl p-6 shadow-lg border border-gray-700 relative overflow-hidden hover:-translate-y-1 hover:shadow-xl transition-all duration-300">
                                     <div className="relative z-10">
                                         <div className="text-gray-400 text-sm font-bold mb-1">系统状态</div>
-                                        <div className="text-2xl font-bold mb-2 font-mono">{now.toLocaleTimeString()}</div>
+                                        <div className="text-2xl font-bold mb-2 font-mono">{formatBeijingTime(now)}</div>
                                         <div className="flex items-center gap-2 text-sm text-green-400">
                                             <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
                                             运行正常
@@ -2120,7 +2123,7 @@ function App() {
                                                             <span className="text-gray-500">开售时间:</span>
                                                             <span className="text-white font-mono">
                                                                 {projectInfo.sale_start
-                                                                    ? new Date(projectInfo.sale_start * 1000).toLocaleString()
+                                                                    ? formatBeijingDateTime(new Date(projectInfo.sale_start * 1000))
                                                                     : (projectInfo.sale_start_str || "未知")}
                                                             </span>
                                                         </div>
@@ -2128,7 +2131,7 @@ function App() {
                                                             <div className="flex gap-2">
                                                                 <span className="text-gray-500">结束时间:</span>
                                                                 <span className="text-white font-mono">
-                                                                    {new Date(projectInfo.sale_end * 1000).toLocaleString()}
+                                                                    {formatBeijingDateTime(new Date(projectInfo.sale_end * 1000))}
                                                                 </span>
                                                             </div>
                                                         )}
@@ -2446,9 +2449,7 @@ function App() {
                                                         />
                                                         <button
                                                             onClick={() => {
-                                                                const now = new Date();
-                                                                const str = now.toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-');
-                                                                setTimeStart(str);
+                                                                setTimeStart(formatBeijingDateTime(new Date()));
                                                             }}
                                                             className="px-3 bg-gray-700 hover:bg-gray-600 rounded-lg text-white font-bold text-xs whitespace-nowrap transition-colors"
                                                             title="设为当前时间"
@@ -2462,8 +2463,7 @@ function App() {
                                                                 const now = new Date();
                                                                 now.setSeconds(59);
                                                                 now.setMilliseconds(900);
-                                                                const str = now.toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-');
-                                                                setTimeStart(str);
+                                                                setTimeStart(formatBeijingDateTime(now));
                                                             }}
                                                             className="py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-xs text-gray-300 transition-colors"
                                                         >
@@ -2476,8 +2476,7 @@ function App() {
                                                                     const now = new Date();
                                                                     now.setMinutes(now.getMinutes() + m);
                                                                     now.setSeconds(0);
-                                                                    const str = now.toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-');
-                                                                    setTimeStart(str);
+                                                                    setTimeStart(formatBeijingDateTime(now));
                                                                 }}
                                                                 className="py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-xs text-gray-300 transition-colors"
                                                             >
