@@ -252,13 +252,11 @@ pub async fn start_buy_task<E: TaskEmitter>(
                     }
                 }
             });
-            let preheat_time = target.clone() - chrono::Duration::minutes(3);
             emit_log(
                 &emitter,
                 &task_id,
                 &format!(
-                    "Waiting until preheat: {} (Sale time: {}, Initial Offset: {}ms)",
-                    preheat_time.format("%Y-%m-%d %H:%M:%S%.3f"),
+                    "Waiting until sale time: {} (Initial Offset: {}ms)",
                     target.format("%Y-%m-%d %H:%M:%S%.3f"),
                     initial_offset
                 ),
@@ -269,19 +267,15 @@ pub async fn start_buy_task<E: TaskEmitter>(
                 &task_id,
                 stop_flag.as_ref(),
                 current_offset.as_ref(),
-                &preheat_time,
-                "Task stopped by user while waiting for preheat.",
+                &target,
+                "Task stopped by user while waiting for sale time.",
             )
             .await
             {
                 return Ok(());
             }
 
-            emit_log(
-                &emitter,
-                &task_id,
-                "Preheat time reached! Preparing order...",
-            );
+            emit_log(&emitter, &task_id, "Sale time reached! Preparing order...");
             scheduled_target = Some(target);
         } else {
             emit_log(
