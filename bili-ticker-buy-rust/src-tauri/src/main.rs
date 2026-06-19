@@ -26,6 +26,63 @@ struct AppState {
     http_client: Client,
 }
 
+#[derive(Clone, serde::Serialize)]
+struct LogPayload {
+    task_id: String,
+    message: String,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct PaymentPayload {
+    task_id: String,
+    url: String,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct TaskResultPayload {
+    task_id: String,
+    success: bool,
+    message: String,
+}
+
+#[derive(Clone)]
+struct TauriTaskEmitter {
+    window: tauri::Window,
+}
+
+impl buy::TaskEmitter for TauriTaskEmitter {
+    fn emit_log(&self, task_id: &str, message: &str) {
+        let _ = self.window.emit(
+            "log",
+            LogPayload {
+                task_id: task_id.to_string(),
+                message: message.to_string(),
+            },
+        );
+    }
+
+    fn emit_payment(&self, task_id: &str, url: &str) {
+        let _ = self.window.emit(
+            "payment_qrcode",
+            PaymentPayload {
+                task_id: task_id.to_string(),
+                url: url.to_string(),
+            },
+        );
+    }
+
+    fn emit_task_result(&self, task_id: &str, success: bool, message: &str) {
+        let _ = self.window.emit(
+            "task_result",
+            TaskResultPayload {
+                task_id: task_id.to_string(),
+                success,
+                message: message.to_string(),
+            },
+        );
+    }
+}
+
 fn get_app_dir(app_handle: &tauri::AppHandle) -> PathBuf {
     let path = app_handle
         .path_resolver()
@@ -306,7 +363,7 @@ async fn start_buy(
     let tasks_clone = state.tasks.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(e) = buy::start_buy_task(
-            window,
+            TauriTaskEmitter { window },
             task_id_clone.clone(),
             stop_flag,
             info,

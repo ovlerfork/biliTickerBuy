@@ -70,6 +70,30 @@ npm run tauri dev
 - 该命令会同时启动 Vite 前端服务器和 Tauri 后端窗口。
 - 首次运行时，Rust 依赖包的编译可能需要几分钟时间，请耐心等待。
 
+## 🐳 Docker Web UI 部署
+
+Web UI 可以用 Docker 部署，浏览器访问 `http://localhost:8080`：
+
+```bash
+pnpm build
+docker build -t bili-ticker-buy-web .
+docker run --rm -p 8080:8080 -v bili-ticker-buy-data:/data bili-ticker-buy-web
+```
+
+如需给 Web UI 加访问密码：
+
+```bash
+docker run --rm -p 8080:8080 -e WEB_PASSWORD='change-me' -v bili-ticker-buy-data:/data bili-ticker-buy-web
+```
+
+使用 GHCR 镜像部署可参考 `compose.example.yml`：
+
+```bash
+docker compose -f compose.example.yml up -d
+```
+
+说明：Web 版复用 Rust 抢票逻辑，账号、历史和项目配置保存在 `/data`。浏览器环境不能像 Tauri 桌面版一样注入 B 站网页 Cookie，“打开 B 站”会退化为打开官网。
+
 ---
 
 ## 🔨 构建生产版本

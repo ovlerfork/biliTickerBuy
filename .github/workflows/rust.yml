@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [ "main" ]
 
+permissions:
+  contents: read
+  packages: write
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -45,3 +49,104 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
       working-directory: ./bili-ticker-buy-rust/src-tauri
+
+  docker-build:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            suffix: amd64
+          - platform: linux/arm64
+            suffix: arm64
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+
+    - name: setup pnpm
+      uses: pnpm/action-setup@v4
+      with:
+        version: 9
+
+    - name: Build Web UI
+      run: |
+        pnpm install --frozen-lockfile
+        pnpm build
+      working-directory: ./bili-ticker-buy-rust
+
+    - name: Prepare Docker tags
+      id: docker-meta
+      run: |
+        IMAGE="$(echo "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+        BRANCH="$(echo "${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}" | tr '[:upper:]' '[:lower:]' | sed 's#[/_]#-#g')"
+        TAGS="${IMAGE}:${BRANCH}-${{ matrix.suffix }}"
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          TAGS="${TAGS},${IMAGE}:pr-${{ github.event.pull_request.number }}-${{ matrix.suffix }}"
+        fi
+        echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+        echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+
+    - name: Login to GHCR
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v6
+      with:
+        context: ./bili-ticker-buy-rust
+        platforms: ${{ matrix.platform }}
+        push: true
+        tags: ${{ steps.docker-meta.outputs.tags }}
+
+  docker-group:
+    runs-on: ubuntu-22.04
+    needs: docker-build
+
+    steps:
+    - name: Prepare Docker tags
+      id: docker-meta
+      run: |
+        IMAGE="$(echo "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+        BRANCH="$(echo "${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}" | tr '[:upper:]' '[:lower:]' | sed 's#[/_]#-#g')"
+        echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+        echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+    - name: Login to GHCR
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Group branch Docker image
+      run: |
+        docker buildx imagetools create \
+          -t "${{ steps.docker-meta.outputs.image }}:${{ steps.docker-meta.outputs.branch }}" \
+          "${{ steps.docker-meta.outputs.image }}:${{ steps.docker-meta.outputs.branch }}-amd64" \
+          "${{ steps.docker-meta.outputs.image }}:${{ steps.docker-meta.outputs.branch }}-arm64"
+
+    - name: Group PR Docker image
+      if: github.event_name == 'pull_request'
+      run: |
+        docker buildx imagetools create \
+          -t "${{ steps.docker-meta.outputs.image }}:pr-${{ github.event.pull_request.number }}" \
+          "${{ steps.docker-meta.outputs.image }}:pr-${{ github.event.pull_request.number }}-amd64" \
+          "${{ steps.docker-meta.outputs.image }}:pr-${{ github.event.pull_request.number }}-arm64"

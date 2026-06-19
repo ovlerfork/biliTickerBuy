@@ -1,0 +1,13 @@
+services:
+  bili-ticker-buy:
+    image: ghcr.io/ovlerfork/bilitickerbuy:pr-12
+    ports:
+      - "8080:8080"
+    environment:
+      WEB_PASSWORD: change-me
+    volumes:
+      - bili-ticker-buy-data:/data
+    restart: unless-stopped
+
+volumes:
+  bili-ticker-buy-data:
