@@ -83,7 +83,12 @@ fn beijing_now() -> chrono::DateTime<FixedOffset> {
 }
 
 fn parse_beijing_time(ts: &str) -> Option<chrono::DateTime<FixedOffset>> {
-    for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"] {
+    for fmt in [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M",
+    ] {
         if let Ok(t) = chrono::NaiveDateTime::parse_from_str(ts, fmt) {
             return t.and_local_timezone(beijing_offset()).single();
         }
@@ -278,11 +283,13 @@ pub async fn start_buy_task<E: TaskEmitter>(
             emit_log(&emitter, &task_id, "Sale time reached! Preparing order...");
             scheduled_target = Some(target);
         } else {
-            emit_log(
-                &emitter,
-                &task_id,
-                "Invalid time format. Starting immediately.",
+            let message = format!(
+                "Invalid scheduled start time format: {}. Expected YYYY-MM-DD HH:mm or YYYY-MM-DD HH:mm:ss.",
+                ts
             );
+            emit_log(&emitter, &task_id, &message);
+            emit_task_result(&emitter, &task_id, false, &message);
+            return Ok(());
         }
     }
 
@@ -684,5 +691,25 @@ mod tests {
         assert_eq!(parsed.hour(), 12);
         assert_eq!(parsed.minute(), 34);
         assert_eq!(parsed.second(), 56);
+    }
+
+    #[test]
+    fn parses_frontend_datetime_local_without_seconds() {
+        let parsed = parse_beijing_time("2026-06-19 07:10").unwrap();
+
+        assert_eq!(parsed.offset().local_minus_utc(), BEIJING_OFFSET_SECONDS);
+        assert_eq!(parsed.hour(), 7);
+        assert_eq!(parsed.minute(), 10);
+        assert_eq!(parsed.second(), 0);
+    }
+
+    #[test]
+    fn parses_frontend_datetime_local_separator() {
+        let parsed = parse_beijing_time("2026-06-19T07:10").unwrap();
+
+        assert_eq!(parsed.offset().local_minus_utc(), BEIJING_OFFSET_SECONDS);
+        assert_eq!(parsed.hour(), 7);
+        assert_eq!(parsed.minute(), 10);
+        assert_eq!(parsed.second(), 0);
     }
 }

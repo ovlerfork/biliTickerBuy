@@ -110,30 +110,36 @@ fn main() {
             unauthorized_response()
         } else {
             match (request.method(), request.url()) {
-            (&Method::Post, "/api/invoke") => {
-                let mut body = String::new();
-                let result = request.as_reader().read_to_string(&mut body);
-                match result
-                    .map_err(|e| e.to_string())
-                    .and_then(|_| serde_json::from_str::<InvokeRequest>(&body).map_err(|e| e.to_string()))
-                    .and_then(|req| runtime.block_on(invoke(state, req)))
-                {
-                    Ok(value) => json_response(StatusCode(200), json!({ "ok": true, "value": value })),
-                    Err(error) => json_response(StatusCode(500), json!({ "ok": false, "error": error })),
+                (&Method::Post, "/api/invoke") => {
+                    let mut body = String::new();
+                    let result = request.as_reader().read_to_string(&mut body);
+                    match result
+                        .map_err(|e| e.to_string())
+                        .and_then(|_| {
+                            serde_json::from_str::<InvokeRequest>(&body).map_err(|e| e.to_string())
+                        })
+                        .and_then(|req| runtime.block_on(invoke(state, req)))
+                    {
+                        Ok(value) => {
+                            json_response(StatusCode(200), json!({ "ok": true, "value": value }))
+                        }
+                        Err(error) => {
+                            json_response(StatusCode(500), json!({ "ok": false, "error": error }))
+                        }
+                    }
                 }
-            }
-            (&Method::Get, url) if url.starts_with("/api/events") => {
-                let since = url
-                    .split_once("since=")
-                    .and_then(|(_, value)| value.parse::<usize>().ok())
-                    .unwrap_or(0);
-                let events = state.events.lock().unwrap();
-                let next = events.len();
-                let items = events.iter().skip(since).cloned().collect::<Vec<_>>();
-                json_response(StatusCode(200), json!({ "next": next, "events": items }))
-            }
-            (&Method::Get, url) => static_response(&state.dist_dir, url),
-            _ => text_response(StatusCode(405), "method not allowed"),
+                (&Method::Get, url) if url.starts_with("/api/events") => {
+                    let since = url
+                        .split_once("since=")
+                        .and_then(|(_, value)| value.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    let events = state.events.lock().unwrap();
+                    let next = events.len();
+                    let items = events.iter().skip(since).cloned().collect::<Vec<_>>();
+                    json_response(StatusCode(200), json!({ "next": next, "events": items }))
+                }
+                (&Method::Get, url) => static_response(&state.dist_dir, url),
+                _ => text_response(StatusCode(405), "method not allowed"),
             }
         };
 
@@ -158,7 +164,8 @@ async fn invoke(state: Arc<AppState>, req: InvokeRequest) -> Result<Value, Strin
         }
         "get_project_history" => to_value(storage::get_project_history(&state.base_dir)),
         "add_project_history" => {
-            let item = serde_json::from_value(req.args["item"].clone()).map_err(|e| e.to_string())?;
+            let item =
+                serde_json::from_value(req.args["item"].clone()).map_err(|e| e.to_string())?;
             storage::add_project_history(&state.base_dir, item).map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
@@ -180,26 +187,30 @@ async fn invoke(state: Arc<AppState>, req: InvokeRequest) -> Result<Value, Strin
                 .map_err(|e| e.to_string())?;
             Ok(json!([url, key]))
         }
-        "poll_login_status" => auth::poll_login(&state.http_client, &arg_string(&req.args, "qrcodeKey")?)
-            .await
-            .map(Value::String)
-            .map_err(|e| e.to_string()),
-        "add_account" => add_account(&state, arg_cookies(&req.args)?).await,
-        "fetch_project" => api::fetch_project_info(&state.http_client, arg_string(&req.args, "id")?)
-            .await
-            .map_err(|e| e.to_string()),
-        "fetch_buyer_list" => {
-            api::fetch_buyers(
-                &state.http_client,
-                arg_string(&req.args, "projectId")?,
-                arg_cookies(&req.args)?,
-            )
-            .await
-            .map_err(|e| e.to_string())
+        "poll_login_status" => {
+            auth::poll_login(&state.http_client, &arg_string(&req.args, "qrcodeKey")?)
+                .await
+                .map(Value::String)
+                .map_err(|e| e.to_string())
         }
-        "fetch_address_list" => api::fetch_address_list(&state.http_client, arg_cookies(&req.args)?)
-            .await
-            .map_err(|e| e.to_string()),
+        "add_account" => add_account(&state, arg_cookies(&req.args)?).await,
+        "fetch_project" => {
+            api::fetch_project_info(&state.http_client, arg_string(&req.args, "id")?)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "fetch_buyer_list" => api::fetch_buyers(
+            &state.http_client,
+            arg_string(&req.args, "projectId")?,
+            arg_cookies(&req.args)?,
+        )
+        .await
+        .map_err(|e| e.to_string()),
+        "fetch_address_list" => {
+            api::fetch_address_list(&state.http_client, arg_cookies(&req.args)?)
+                .await
+                .map_err(|e| e.to_string())
+        }
         "sync_time" => serde_json::to_value(
             api::sample_time(&state.http_client, api::DEFAULT_TIME_SERVER)
                 .await
@@ -208,7 +219,12 @@ async fn invoke(state: Arc<AppState>, req: InvokeRequest) -> Result<Value, Strin
         .map_err(|e| e.to_string()),
         "start_buy" => start_buy(state, req.args).await.map(Value::String),
         "stop_task" => {
-            if let Some(flag) = state.tasks.lock().unwrap().get(&arg_string(&req.args, "taskId")?) {
+            if let Some(flag) = state
+                .tasks
+                .lock()
+                .unwrap()
+                .get(&arg_string(&req.args, "taskId")?)
+            {
                 flag.store(true, Ordering::Relaxed);
             }
             Ok(Value::Null)
@@ -246,8 +262,8 @@ async fn add_account(state: &AppState, cookies: Vec<String>) -> Result<Value, St
 
 async fn start_buy(state: Arc<AppState>, args: Value) -> Result<String, String> {
     let time_start = arg_opt_string(&args, "timeStart").filter(|s| !s.trim().is_empty());
-    let mut info: TicketInfo = serde_json::from_str(&arg_string(&args, "ticketInfo")?)
-        .map_err(|e| e.to_string())?;
+    let mut info: TicketInfo =
+        serde_json::from_str(&arg_string(&args, "ticketInfo")?).map_err(|e| e.to_string())?;
     let buyers = args
         .get("buyers")
         .and_then(|v| serde_json::from_value::<Vec<Value>>(v.clone()).ok());
@@ -316,7 +332,9 @@ fn arg_string(args: &Value, key: &str) -> Result<String, String> {
 }
 
 fn arg_opt_string(args: &Value, key: &str) -> Option<String> {
-    args.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 fn arg_cookies(args: &Value) -> Result<Vec<String>, String> {
@@ -346,13 +364,18 @@ fn json_response(status: StatusCode, value: Value) -> Response<std::io::Cursor<V
 fn text_response(status: StatusCode, text: &str) -> Response<std::io::Cursor<Vec<u8>>> {
     Response::from_string(text)
         .with_status_code(status)
-        .with_header(Header::from_bytes(&b"content-type"[..], &b"text/plain; charset=utf-8"[..]).unwrap())
+        .with_header(
+            Header::from_bytes(&b"content-type"[..], &b"text/plain; charset=utf-8"[..]).unwrap(),
+        )
 }
 
 fn unauthorized_response() -> Response<std::io::Cursor<Vec<u8>>> {
     text_response(StatusCode(401), "authentication required").with_header(
-        Header::from_bytes(&b"www-authenticate"[..], &b"Basic realm=\"bili-ticker-buy\""[..])
-            .unwrap(),
+        Header::from_bytes(
+            &b"www-authenticate"[..],
+            &b"Basic realm=\"bili-ticker-buy\""[..],
+        )
+        .unwrap(),
     )
 }
 
@@ -411,7 +434,11 @@ fn static_response(dist_dir: &Path, url: &str) -> Response<std::io::Cursor<Vec<u
     } else {
         dist_dir.join(clean.trim_start_matches('/'))
     };
-    let path = if path.exists() { path } else { dist_dir.join("index.html") };
+    let path = if path.exists() {
+        path
+    } else {
+        dist_dir.join("index.html")
+    };
 
     match fs::read(&path) {
         Ok(bytes) => Response::from_data(bytes).with_header(
