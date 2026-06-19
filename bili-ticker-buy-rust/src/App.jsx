@@ -20,6 +20,14 @@ const appendLogLine = (lines, line) => [...lines, line].slice(-LOG_BUFFER_LIMIT)
 const logTime = (log) => typeof log === "string" ? "" : log.time;
 const logMessage = (log) => typeof log === "string" ? log : log.message;
 const normalizeTimeServer = (server) => server === BILIBILI_SECONDS_TIME_API ? DEFAULT_TIME_SERVER : server;
+const getSyncQualityIssue = (quality) => {
+    if (!quality) return null;
+    if (Number(quality.sample_count || 0) < 2) return "有效时间样本不足";
+    if (quality.label === "poor") return "时间采样波动过大";
+    if (Number(quality.best_round_trip || 0) > 1500) return "时间服务器响应过慢";
+    if (Number(quality.spread || 0) > 200) return "时间样本离散过大";
+    return null;
+};
 
 const formatSyncQuality = (quality) => {
     if (!quality) return "未同步";
@@ -1200,9 +1208,19 @@ function App() {
                 currentOffset = safeOffset;
                 syncLog = `时间已自动校准，最佳偏移: ${safeOffset}ms${quality ? `，${formatSyncQuality(quality)}` : ""}`;
                 setLogs(prev => appendLogLine(prev, syncLog));
+
+                const syncIssue = getSyncQualityIssue(quality);
+                if (syncIssue) {
+                    const message = `时间校准质量不足：${syncIssue}，请重新同步后再启动任务`;
+                    setLogs(prev => appendLogLine(prev, message));
+                    alert(message);
+                    return;
+                }
             } catch (e) {
                 syncLog = "时间自动校准失败: " + e;
                 setLogs(prev => appendLogLine(prev, syncLog));
+                alert(syncLog);
+                return;
             }
 
             setLogs(prev => appendLogLine(prev, `正在启动任务，共 ${selectedBuyers.length} 个购票人...`));

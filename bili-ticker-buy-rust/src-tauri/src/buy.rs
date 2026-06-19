@@ -14,6 +14,9 @@ use log::info;
 use serde_json::json;
 use chrono::Local;
 
+const TIME_SYNC_FREEZE_BEFORE_START_MS: i64 = 2000;
+const TIME_SYNC_OFFSET_JUMP_WARN_MS: i64 = 300;
+
 /// Error code dictionary from the original Python project
 /// Maps error codes to human-readable messages
 fn get_error_message(errno: i64) -> &'static str {
@@ -146,6 +149,7 @@ pub async fn start_buy_task(
             let initial_offset = time_offset.unwrap_or(0.0) as i64;
             let current_offset = Arc::new(AtomicI64::new(initial_offset));
             let offset_clone = current_offset.clone();
+            let target_for_sync = target.clone();
             let stop_flag_clone = stop_flag.clone();
             let ntp_server_clone = ntp_server.clone();
             let task_id_clone = task_id.clone();
@@ -155,28 +159,41 @@ pub async fn start_buy_task(
             // Spawn background sync task
             tokio::spawn(async move {
                 let sync_interval = Duration::from_secs(10);
+                let mut pending_offset: Option<i64> = None;
                 loop {
                     if stop_flag_clone.load(Ordering::Relaxed) { break; }
                     sleep(sync_interval).await;
+
+                    let now = Local::now();
+                    let offset_val = offset_clone.load(Ordering::Relaxed);
+                    let target_with_offset = target_for_sync - chrono::Duration::milliseconds(offset_val);
+                    let remaining_ms = (target_with_offset - now).num_milliseconds();
+                    if remaining_ms <= TIME_SYNC_FREEZE_BEFORE_START_MS {
+                        break;
+                    }
                     
                     let url = ntp_server_clone.clone().unwrap_or_else(|| api::DEFAULT_TIME_SERVER.to_string());
-                    let ntp_url = url.clone();
-                    let sync_result = if url.starts_with("http") {
-                        api::get_server_time(&time_client_clone, Some(url.clone())).await
-                    } else {
-                        // Wrap blocking NTP call in spawn_blocking to avoid blocking the async runtime
-                        let ntp_url_owned = ntp_url.clone();
-                        tokio::task::spawn_blocking(move || {
-                            api::get_ntp_time(&ntp_url_owned).map(|t| t as i64)
-                        }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("Task join error: {}", e)))
-                    };
 
-                    match sync_result {
-                        Ok(server_time) => {
-                            let local_time = api::get_local_time();
-                            let new_offset = server_time - local_time;
-                            offset_clone.store(new_offset, Ordering::Relaxed);
-                            // Log occasionally or just debug? Keeping it quiet to avoid log spam, or use debug!
+                    match api::sample_time(&time_client_clone, &url).await {
+                        Ok(result) => {
+                            let new_offset = result.diff;
+                            let old_offset = offset_clone.load(Ordering::Relaxed);
+                            if (new_offset - old_offset).abs() > TIME_SYNC_OFFSET_JUMP_WARN_MS {
+                                if pending_offset
+                                    .map(|pending| (new_offset - pending).abs() <= TIME_SYNC_OFFSET_JUMP_WARN_MS)
+                                    .unwrap_or(false)
+                                {
+                                    offset_clone.store(new_offset, Ordering::Relaxed);
+                                    pending_offset = None;
+                                    emit_log(&window_clone, &task_id_clone, &format!("Background sync accepted offset jump: {}ms", new_offset));
+                                } else {
+                                    pending_offset = Some(new_offset);
+                                    emit_log(&window_clone, &task_id_clone, &format!("Background sync offset jump ignored once: {}ms -> {}ms", old_offset, new_offset));
+                                }
+                            } else {
+                                offset_clone.store(new_offset, Ordering::Relaxed);
+                                pending_offset = None;
+                            }
                         },
                         Err(e) => {
                              emit_log(&window_clone, &task_id_clone, &format!("Background sync failed: {}", e));
