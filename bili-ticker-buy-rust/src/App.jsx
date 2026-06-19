@@ -34,6 +34,15 @@ const formatBeijingDateTime = (date) => {
     );
     return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
 };
+const formatSaleStart = (saleStart) => {
+    if (!saleStart) return "";
+    if (typeof saleStart === "number") return formatBeijingDateTime(new Date(saleStart * 1000));
+    if (typeof saleStart === "string") {
+        const parsed = new Date(saleStart);
+        return Number.isNaN(parsed.getTime()) ? "" : formatBeijingDateTime(parsed);
+    }
+    return "";
+};
 const formatBeijingTimeWithMs = (date) => {
     const time = formatBeijingDateTime(date).split(" ")[1];
     return `${time}.${date.getMilliseconds().toString().padStart(3, "0")}`;
@@ -684,7 +693,7 @@ function App() {
                 if (response.data.sale_start) {
                     setTimeStart(formatBeijingDateTime(new Date(response.data.sale_start * 1000)));
                 } else if (response.data.sale_start_str) {
-                    setTimeStart(response.data.sale_start_str);
+                    setTimeStart(formatSaleStart(response.data.sale_start_str));
                 }
 
                 // Save to project history immediately
@@ -730,11 +739,7 @@ function App() {
     function handleSkuSelect(sku) {
         setSelectedSku(sku);
         if (sku.sale_start) {
-            let timeStr = sku.sale_start;
-            // If it's a timestamp (number), convert it.
-            if (typeof timeStr === 'number') {
-                timeStr = formatBeijingDateTime(new Date(timeStr * 1000));
-            }
+            let timeStr = formatSaleStart(sku.sale_start);
             if (timeStr) {
                 setTimeStart(timeStr);
                 // Optional: Flash a message or log
@@ -1841,80 +1846,75 @@ function App() {
 
                                     return (
                                     <div key={task.id} className={`bg-gray-800 rounded-xl border shadow-lg flex flex-col transition-all duration-300 hover:border-gray-600 hover:shadow-xl ${task.status === 'running' ? 'border-green-500/40 shadow-green-500/5' : 'border-gray-700'} ${viewMode === "grid" ? "h-[500px]" : "p-6"}`}>
-                                        <div className={viewMode === "grid" ? "p-3 border-b border-gray-700 bg-gray-900/50" : "flex items-start justify-between mb-4"}>
-                                            <div className="flex items-center justify-between w-full">
-                                                <div className="flex items-center gap-3 overflow-hidden">
-                                                    <div className={`w-3 h-3 rounded-full flex-shrink-0 ${task.status === 'running' ? 'bg-green-500 animate-pulse' :
+                                        <div className={viewMode === "grid" ? "p-3 border-b border-gray-700 bg-gray-900/50" : "mb-4"}>
+                                            <div className="flex items-start justify-between gap-3">
+                                                <div className="flex min-w-0 flex-1 items-start gap-3">
+                                                    <div className={`w-3 h-3 rounded-full flex-shrink-0 mt-1 ${task.status === 'running' ? 'bg-green-500 animate-pulse' :
                                                         task.status === 'success' ? 'bg-blue-500' :
                                                             task.status === 'pending' ? 'bg-yellow-500' :
                                                                 'bg-red-500'
                                                         }`} />
-                                                    <div className="overflow-hidden">
-                                                        <div className="font-bold text-sm truncate flex items-center gap-2">
-                                                            <span className="text-white">
-                                                                {task.buyers
-                                                                    ? task.buyers.map(b => b.name).join(", ")
-                                                                    : (task.buyer?.name || "未知购票人")
-                                                                }
-                                                            </span>
+                                                    <div className="min-w-0 flex-1 space-y-1">
+                                                        <div className="font-bold text-sm text-white break-words">
+                                                            {task.buyers
+                                                                ? task.buyers.map(b => b.name).join(", ")
+                                                                : (task.buyer?.name || "未知购票人")
+                                                            }
                                                         </div>
-                                                        <span className="text-xs text-gray-500 bg-gray-900 px-1.5 py-0.5 rounded border border-gray-700">
-                                                            {task.accountName}
-                                                        </span>
-                                                        {task.status === 'pending' && <span className="text-[10px] bg-yellow-500/20 text-yellow-400 px-1.5 py-0.5 rounded">待启动</span>}
-                                                        {task.status === 'scheduled' && <span className="text-[10px] bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded animate-pulse">定时</span>}
-                                                    </div>
-                                                    <div className="text-xs text-gray-400 truncate mt-0.5">
-                                                        {task.project}
-                                                    </div>
-                                                    {viewMode === "list" && (
-                                                        <div className="text-[10px] text-gray-500 font-mono mt-0.5">
+                                                        <div className="flex flex-wrap items-center gap-1.5">
+                                                            <span className="text-xs text-gray-500 bg-gray-900 px-1.5 py-0.5 rounded border border-gray-700">
+                                                                {task.accountName}
+                                                            </span>
+                                                            {task.status === 'pending' && <span className="text-[10px] bg-yellow-500/20 text-yellow-400 px-1.5 py-0.5 rounded">待启动</span>}
+                                                            {task.status === 'scheduled' && <span className="text-[10px] bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded animate-pulse">定时</span>}
+                                                        </div>
+                                                        <div className="text-xs text-gray-400 break-words">
+                                                            {task.project}
+                                                        </div>
+                                                        <div className="text-[10px] text-gray-500 font-mono break-words">
                                                             {task.screen} - {task.sku}
                                                         </div>
+                                                        <div className="text-[10px] text-gray-500 font-mono break-words">
+                                                            {task.startTime}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                <div className="flex items-center gap-1 flex-shrink-0 ml-2">
+                                                    {task.status === 'pending' && (
+                                                        <button
+                                                            onClick={() => runPendingTask(task)}
+                                                            className="p-1.5 bg-green-600 hover:bg-green-500 text-white rounded text-xs font-bold"
+                                                            title="启动"
+                                                        >
+                                                            <Play size={14} />
+                                                        </button>
                                                     )}
+                                                    {(task.status === 'running' || task.status === 'scheduled') && (
+                                                        <button
+                                                            onClick={() => stopTask(task.id)}
+                                                            className="p-1.5 bg-red-900/30 text-red-400 hover:bg-red-900/50 rounded text-xs font-bold border border-red-900/50"
+                                                            title="停止"
+                                                        >
+                                                            <Square size={14} fill="currentColor" />
+                                                        </button>
+                                                    )}
+                                                    <button
+                                                        onClick={() => {
+                                                            setTasks(prev => prev.filter(t => t.id !== task.id));
+                                                            setVisibleTaskLogLines(prev => {
+                                                                const next = { ...prev };
+                                                                delete next[task.id];
+                                                                return next;
+                                                            });
+                                                        }}
+                                                        className="p-1.5 text-gray-500 hover:text-red-400"
+                                                        title="删除任务"
+                                                    >
+                                                        <X size={14} />
+                                                    </button>
                                                 </div>
                                             </div>
-                                            <div className="flex items-center gap-1 flex-shrink-0 ml-2">
-                                                {task.status === 'pending' && (
-                                                    <button
-                                                        onClick={() => runPendingTask(task)}
-                                                        className="p-1.5 bg-green-600 hover:bg-green-500 text-white rounded text-xs font-bold"
-                                                        title="启动"
-                                                    >
-                                                        <Play size={14} />
-                                                    </button>
-                                                )}
-                                                {(task.status === 'running' || task.status === 'scheduled') && (
-                                                    <button
-                                                        onClick={() => stopTask(task.id)}
-                                                        className="p-1.5 bg-red-900/30 text-red-400 hover:bg-red-900/50 rounded text-xs font-bold border border-red-900/50"
-                                                        title="停止"
-                                                    >
-                                                        <Square size={14} fill="currentColor" />
-                                                    </button>
-                                                )}
-                                                <button
-                                                    onClick={() => {
-                                                        setTasks(prev => prev.filter(t => t.id !== task.id));
-                                                        setVisibleTaskLogLines(prev => {
-                                                            const next = { ...prev };
-                                                            delete next[task.id];
-                                                            return next;
-                                                        });
-                                                    }}
-                                                    className="p-1.5 text-gray-500 hover:text-red-400"
-                                                    title="删除任务"
-                                                >
-                                                    <X size={14} />
-                                                </button>
-                                            </div>
                                         </div>
-                                        {viewMode === "list" && (
-                                            <div className="text-xs text-gray-500 font-mono mt-1 ml-7">
-                                                {task.startTime}
-                                            </div>
-                                        )}
-
                                         {/* Payment URL & QR Code */}
                                         {
                                             task.paymentUrl && (
@@ -2004,6 +2004,7 @@ function App() {
                                         <button
                                             onClick={saveTask}
                                             className="bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 font-bold border border-gray-600"
+                                            title="保存到任务列表；已填写开始时间时会创建定时任务并等待开抢"
                                         >
                                             <Save size={20} />
                                             保存
@@ -2011,6 +2012,7 @@ function App() {
                                         <button
                                             onClick={startBuy}
                                             className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white px-6 py-2 rounded-lg flex items-center gap-2 font-bold shadow-lg transform transition active:scale-95"
+                                            title="立即提交启动请求；已填写开始时间时会等待到点执行"
                                         >
                                             <Rocket size={20} />
                                             立即启动
@@ -2117,9 +2119,7 @@ function App() {
                                                         <div className="flex gap-2">
                                                             <span className="text-gray-500">开售时间:</span>
                                                             <span className="text-white font-mono">
-                                                                {projectInfo.sale_start
-                                                                    ? formatBeijingDateTime(new Date(projectInfo.sale_start * 1000))
-                                                                    : (projectInfo.sale_start_str || "未知")}
+                                                                {formatSaleStart(selectedSku?.sale_start) || formatSaleStart(projectInfo.sale_start) || formatSaleStart(projectInfo.sale_start_str) || "未知"}
                                                             </span>
                                                         </div>
                                                         {projectInfo.sale_end && (
@@ -2207,7 +2207,7 @@ function App() {
                                                                         </div>
                                                                         {sku.sale_start && (
                                                                             <div className="text-[10px] text-gray-400 mt-1 scale-90 origin-left">
-                                                                                {sku.sale_start}
+                                                                                {formatSaleStart(sku.sale_start)}
                                                                             </div>
                                                                         )}
                                                                         {/* 显示SKU标签 */}
@@ -2430,57 +2430,57 @@ function App() {
 
                                     {/* Right Column: Settings */}
                                     <div className="space-y-6">
-                                        <div className="grid grid-cols-2 gap-4">
-                                            <div>
-                                                <label className="block text-sm font-medium text-gray-400 mb-2">开始时间 (定时抢票)</label>
-                                                <div className="space-y-2">
-                                                    <div className="flex gap-2">
-                                                        <input
-                                                            type="datetime-local"
-                                                            step="1"
-                                                            className="flex-1 bg-gray-900 border border-gray-700 rounded-lg p-2.5 text-white focus:border-blue-500 focus:outline-none font-mono text-sm"
-                                                            value={timeStart.replace(' ', 'T')}
-                                                            onChange={(e) => setTimeStart(e.target.value.replace('T', ' '))}
-                                                        />
+                                        <div>
+                                            <label className="block text-sm font-medium text-gray-400 mb-2">开始时间 (定时抢票)</label>
+                                            <div className="space-y-2">
+                                                <div className="flex gap-2">
+                                                    <input
+                                                        type="datetime-local"
+                                                        step="1"
+                                                        className="flex-1 min-w-0 bg-gray-900 border border-gray-700 rounded-lg p-2.5 text-white focus:border-blue-500 focus:outline-none font-mono text-sm"
+                                                        value={timeStart.replace(' ', 'T')}
+                                                        onChange={(e) => setTimeStart(e.target.value.replace('T', ' '))}
+                                                    />
+                                                    <button
+                                                        onClick={() => {
+                                                            setTimeStart(formatBeijingDateTime(new Date()));
+                                                        }}
+                                                        className="px-3 bg-gray-700 hover:bg-gray-600 rounded-lg text-white font-bold text-xs whitespace-nowrap transition-colors"
+                                                        title="设为当前时间"
+                                                    >
+                                                        当前
+                                                    </button>
+                                                </div>
+                                                <div className="grid grid-cols-4 gap-2">
+                                                    <button
+                                                        onClick={() => {
+                                                            const now = new Date();
+                                                            now.setSeconds(59);
+                                                            now.setMilliseconds(900);
+                                                            setTimeStart(formatBeijingDateTime(now));
+                                                        }}
+                                                        className="py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-xs text-gray-300 transition-colors"
+                                                    >
+                                                        +59秒
+                                                    </button>
+                                                    {[1, 5, 10].map(m => (
                                                         <button
-                                                            onClick={() => {
-                                                                setTimeStart(formatBeijingDateTime(new Date()));
-                                                            }}
-                                                            className="px-3 bg-gray-700 hover:bg-gray-600 rounded-lg text-white font-bold text-xs whitespace-nowrap transition-colors"
-                                                            title="设为当前时间"
-                                                        >
-                                                            当前
-                                                        </button>
-                                                    </div>
-                                                    <div className="grid grid-cols-4 gap-2">
-                                                        <button
+                                                            key={m}
                                                             onClick={() => {
                                                                 const now = new Date();
-                                                                now.setSeconds(59);
-                                                                now.setMilliseconds(900);
+                                                                now.setMinutes(now.getMinutes() + m);
+                                                                now.setSeconds(0);
                                                                 setTimeStart(formatBeijingDateTime(now));
                                                             }}
                                                             className="py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-xs text-gray-300 transition-colors"
                                                         >
-                                                            +59秒
+                                                            +{m}分
                                                         </button>
-                                                        {[1, 5, 10].map(m => (
-                                                            <button
-                                                                key={m}
-                                                                onClick={() => {
-                                                                    const now = new Date();
-                                                                    now.setMinutes(now.getMinutes() + m);
-                                                                    now.setSeconds(0);
-                                                                    setTimeStart(formatBeijingDateTime(now));
-                                                                }}
-                                                                className="py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-xs text-gray-300 transition-colors"
-                                                            >
-                                                                +{m}分
-                                                            </button>
-                                                        ))}
-                                                    </div>
+                                                    ))}
                                                 </div>
                                             </div>
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-4">
                                             <div>
                                                 <label className="block text-sm font-medium text-gray-400 mb-2">请求间隔 (ms)</label>
                                                 <input
@@ -2490,16 +2490,16 @@ function App() {
                                                     onChange={(e) => setRequestInterval(e.target.value)}
                                                 />
                                             </div>
-                                        </div>
-                                        <div>
-                                            <label className="block text-sm font-medium text-gray-400 mb-2">尝试次数</label>
-                                            <input
-                                                type="number"
-                                                className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:border-blue-500 focus:outline-none"
-                                                value={totalAttempts}
-                                                onChange={(e) => setTotalAttempts(e.target.value)}
-                                                disabled={mode === 0}
-                                            />
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-400 mb-2">尝试次数</label>
+                                                <input
+                                                    type="number"
+                                                    className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:border-blue-500 focus:outline-none"
+                                                    value={totalAttempts}
+                                                    onChange={(e) => setTotalAttempts(e.target.value)}
+                                                    disabled={mode === 0}
+                                                />
+                                            </div>
                                         </div>
 
                                         <div>
