@@ -12,7 +12,7 @@ import "./App.css";
 const DEFAULT_VISIBLE_LOG_LINES = 100;
 // ponytail: keep enough in-session history; backend log pagination if users need more.
 const LOG_BUFFER_LIMIT = 1000;
-const SYNC_TIME_TIMEOUT_MS = 18000;
+const SYNC_TIME_TIMEOUT_MS = 12000;
 const DEFAULT_TIME_SERVER = "ntp.aliyun.com";
 const BILIBILI_SECONDS_TIME_API = "https://api.bilibili.com/x/report/click/now";
 

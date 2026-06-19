@@ -66,7 +66,7 @@ fn build_time_sync_result(
     failed_sample_count: usize,
     current_local: i64,
 ) -> Result<TimeSyncResult, String> {
-    const MIN_SUCCESSFUL_TIME_SYNC_SAMPLES: usize = 3;
+    const MIN_SUCCESSFUL_TIME_SYNC_SAMPLES: usize = 2;
 
     if samples.len() < MIN_SUCCESSFUL_TIME_SYNC_SAMPLES {
         return Err(format!(
@@ -85,7 +85,7 @@ fn build_time_sync_result(
 
     samples.sort_by_key(|sample| score_time_sample(sample, median_offset));
     let best = samples[0].clone();
-    let trustworthy = samples.len() >= 3 && spread <= 200 && best.round_trip <= 1500;
+    let trustworthy = samples.len() >= 2 && spread <= 200 && best.round_trip <= 1500;
     let label = if trustworthy {
         "good"
     } else if spread <= 500 && best.round_trip <= 3000 {
@@ -172,21 +172,14 @@ mod tests {
                     local_after: 1_010,
                     round_trip: 110,
                 },
-                TimeSyncSample {
-                    offset: 98,
-                    server: 1_098,
-                    local_before: 900,
-                    local_after: 1_006,
-                    round_trip: 106,
-                },
             ],
-            2,
+            1,
             2_000,
         )
         .unwrap();
 
-        assert_eq!(result.quality.sample_count, 3);
-        assert_eq!(result.quality.failed_sample_count, 2);
+        assert_eq!(result.quality.sample_count, 2);
+        assert_eq!(result.quality.failed_sample_count, 1);
         assert!(result.quality.trustworthy);
     }
 }
@@ -346,7 +339,7 @@ async fn sync_time(
     let mut samples = Vec::new();
     let mut failed_sample_count = 0;
 
-    for attempt in 0..5 {
+    for attempt in 0..3 {
         let local_before = api::get_local_time();
         let server_time_result = if url.starts_with("http") {
             api::get_server_time(&state.http_client, Some(url.clone()))
@@ -367,20 +360,23 @@ async fn sync_time(
                 let round_trip = local_after.saturating_sub(local_before);
                 let local_midpoint = local_before.saturating_add(round_trip / 2);
 
-                samples.push(TimeSyncSample {
-                    offset: server_time.saturating_sub(local_midpoint),
-                    server: server_time,
-                    local_before,
-                    local_after,
-                    round_trip,
-                });
+                // ponytail: first request warms DNS/TCP/NTP path; use later samples for offset.
+                if attempt > 0 {
+                    samples.push(TimeSyncSample {
+                        offset: server_time.saturating_sub(local_midpoint),
+                        server: server_time,
+                        local_before,
+                        local_after,
+                        round_trip,
+                    });
+                }
             }
             Err(_) => {
                 failed_sample_count += 1;
             }
         }
 
-        if attempt < 4 {
+        if attempt < 2 {
             tokio::time::sleep(Duration::from_millis(80)).await;
         }
     }
