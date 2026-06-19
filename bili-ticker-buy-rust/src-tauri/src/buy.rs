@@ -159,7 +159,7 @@ pub async fn start_buy_task(
                     if stop_flag_clone.load(Ordering::Relaxed) { break; }
                     sleep(sync_interval).await;
                     
-                    let url = ntp_server_clone.clone().unwrap_or_else(|| "https://api.bilibili.com/x/report/click/now".to_string());
+                    let url = ntp_server_clone.clone().unwrap_or_else(|| api::DEFAULT_TIME_SERVER.to_string());
                     let ntp_url = url.clone();
                     let sync_result = if url.starts_with("http") {
                         api::get_server_time(&time_client_clone, Some(url.clone())).await

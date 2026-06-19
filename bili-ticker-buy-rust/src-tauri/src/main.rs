@@ -342,8 +342,7 @@ async fn sync_time(
     state: tauri::State<'_, AppState>,
     server_url: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let url =
-        server_url.unwrap_or_else(|| "https://api.bilibili.com/x/report/click/now".to_string());
+    let url = server_url.unwrap_or_else(|| api::DEFAULT_TIME_SERVER.to_string());
     let mut samples = Vec::new();
     let mut failed_sample_count = 0;
 
