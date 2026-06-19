@@ -5,6 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use std::net::UdpSocket;
 use sntpc;
 
+pub const DEFAULT_TIME_SERVER: &str = "ntp.aliyun.com";
+
 pub fn build_shared_client() -> Result<Client> {
     Client::builder()
         .connect_timeout(Duration::from_secs(3))
@@ -311,8 +313,7 @@ pub async fn fetch_address_list(client: &Client, cookies: Vec<String>) -> Result
 }
 
 pub async fn get_server_time(client: &Client, url_opt: Option<String>) -> Result<i64> {
-    // Default to Bilibili if no URL provided
-    let url = url_opt.unwrap_or_else(|| "https://api.bilibili.com/x/report/click/now".to_string());
+    let url = url_opt.ok_or_else(|| anyhow!("HTTP time API URL is required"))?;
     
     let res: Value = client.get(&url)
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -322,8 +323,8 @@ pub async fn get_server_time(client: &Client, url_opt: Option<String>) -> Result
         .json()
         .await?;
     
-    // 1. Bilibili Format: {"data": {"now": 169...}} (Seconds, sometimes fractional seconds)
-    if let Some(t) = parse_bilibili_now_to_millis(&res["data"]["now"]) {
+    // 1. Generic nested time: {"data": {"now": 169...}} (seconds or millis by magnitude)
+    if let Some(t) = parse_data_now_to_millis(&res["data"]["now"]) {
         return Ok(t);
     }
 
@@ -363,7 +364,7 @@ fn parse_epoch_millis(value: &Value) -> Option<i64> {
     }
 }
 
-fn parse_bilibili_now_to_millis(value: &Value) -> Option<i64> {
+fn parse_data_now_to_millis(value: &Value) -> Option<i64> {
     let raw = match value {
         Value::Number(n) => n.to_string(),
         Value::String(s) => s.trim().to_string(),
@@ -425,24 +426,24 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn parses_bilibili_fractional_seconds_as_millis() {
+    fn parses_fractional_seconds_as_millis() {
         let value: Value = serde_json::from_str(r#"1690000000.123"#).unwrap();
 
-        assert_eq!(parse_bilibili_now_to_millis(&value), Some(1_690_000_000_123));
+        assert_eq!(parse_data_now_to_millis(&value), Some(1_690_000_000_123));
     }
 
     #[test]
-    fn parses_bilibili_integer_seconds_as_millis() {
+    fn parses_integer_seconds_as_millis() {
         assert_eq!(
-            parse_bilibili_now_to_millis(&json!(1_690_000_000)),
+            parse_data_now_to_millis(&json!(1_690_000_000)),
             Some(1_690_000_000_000)
         );
     }
 
     #[test]
-    fn keeps_bilibili_integer_millis() {
+    fn keeps_integer_millis() {
         assert_eq!(
-            parse_bilibili_now_to_millis(&json!(1_690_000_000_123i64)),
+            parse_data_now_to_millis(&json!(1_690_000_000_123i64)),
             Some(1_690_000_000_123)
         );
     }

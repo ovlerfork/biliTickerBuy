@@ -13,10 +13,13 @@ const DEFAULT_VISIBLE_LOG_LINES = 100;
 // ponytail: keep enough in-session history; backend log pagination if users need more.
 const LOG_BUFFER_LIMIT = 1000;
 const SYNC_TIME_TIMEOUT_MS = 18000;
+const DEFAULT_TIME_SERVER = "ntp.aliyun.com";
+const BILIBILI_SECONDS_TIME_API = "https://api.bilibili.com/x/report/click/now";
 
 const appendLogLine = (lines, line) => [...lines, line].slice(-LOG_BUFFER_LIMIT);
 const logTime = (log) => typeof log === "string" ? "" : log.time;
 const logMessage = (log) => typeof log === "string" ? log : log.message;
+const normalizeTimeServer = (server) => server === BILIBILI_SECONDS_TIME_API ? DEFAULT_TIME_SERVER : server;
 
 const formatSyncQuality = (quality) => {
     if (!quality) return "未同步";
@@ -168,7 +171,7 @@ function App() {
 
     // Advanced Settings
     const [timeOffset, setTimeOffsetState] = useState(0);
-    const [ntpServer, setNtpServer] = useState("https://api.bilibili.com/x/report/click/now");
+    const [ntpServer, setNtpServer] = useState(DEFAULT_TIME_SERVER);
     const [syncInterval, setSyncInterval] = useState(0); // 0 = 不自动同步，只在手动操作时同步
     const [lastSyncTime, setLastSyncTime] = useState(null);
     const [syncQuality, setSyncQuality] = useState(null);
@@ -271,7 +274,7 @@ function App() {
                 const settings = JSON.parse(savedSettings);
                 if (settings.proxy) setProxy(settings.proxy);
                 if (settings.notifications) setNotifications(settings.notifications);
-                if (settings.ntpServer) setNtpServer(settings.ntpServer);
+                if (settings.ntpServer) setNtpServer(normalizeTimeServer(settings.ntpServer));
                 if (settings.syncInterval) setSyncInterval(settings.syncInterval);
                 // timeOffset is usually synced on startup, but we can load it too if needed
                 // if (settings.timeOffset) updateTimeOffset(settings.timeOffset);
@@ -804,6 +807,7 @@ function App() {
                 if (config.totalAttempts) setTotalAttempts(config.totalAttempts);
                 if (config.proxy) setProxy(config.proxy);
                 if (typeof config.timeOffset !== "undefined") updateTimeOffset(config.timeOffset);
+                if (config.ntpServer) setNtpServer(normalizeTimeServer(config.ntpServer));
                 if (config.buyerAddresses) {
                     const normalizedMap = Object.fromEntries(
                         Object.entries(config.buyerAddresses).map(([key, addr]) => [key, normalizeAddress(addr)])
@@ -2598,15 +2602,14 @@ function App() {
                                                 <input
                                                     type="text"
                                                     className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:border-blue-500 focus:outline-none"
-                                                    placeholder="https://api.bilibili.com/x/report/click/now 或 pool.ntp.org"
+                                                    placeholder="ntp.aliyun.com 或 HTTP 时间 API"
                                                     value={ntpServer}
                                                     onChange={(e) => setNtpServer(e.target.value)}
                                                 />
                                                 <div className="flex flex-wrap gap-2">
                                                     {[
-                                                        { name: "B站 API", value: "https://api.bilibili.com/x/report/click/now" },
-                                                        { name: "淘宝 API", value: "http://api.m.taobao.com/rest/api3.do?api=mtop.common.getTimestamp" },
                                                         { name: "阿里云 NTP", value: "ntp.aliyun.com" },
+                                                        { name: "淘宝 API", value: "http://api.m.taobao.com/rest/api3.do?api=mtop.common.getTimestamp" },
                                                         { name: "腾讯云 NTP", value: "ntp.tencent.com" },
                                                         { name: "国家授时", value: "ntp.ntsc.ac.cn" }
                                                     ].map((server) => (
