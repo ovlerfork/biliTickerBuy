@@ -12,7 +12,11 @@ use crate::api; // Import api module
 use anyhow::Result;
 use log::info;
 use serde_json::json;
-use chrono::Local;
+use chrono::{FixedOffset, Local};
+
+const BEIJING_OFFSET_SECONDS: i32 = 8 * 60 * 60;
+const TIME_SYNC_FREEZE_BEFORE_START_MS: i64 = 2000;
+const TIME_SYNC_OFFSET_JUMP_WARN_MS: i64 = 300;
 
 /// Error code dictionary from the original Python project
 /// Maps error codes to human-readable messages
@@ -79,10 +83,27 @@ fn emit_log(window: &Window, task_id: &str, message: &str) {
     info!("[{}] {}", task_id, message);
 }
 
-fn remaining_ms_until(target: &chrono::DateTime<Local>, current_offset: &AtomicI64) -> i64 {
+fn beijing_offset() -> FixedOffset {
+    FixedOffset::east_opt(BEIJING_OFFSET_SECONDS).unwrap()
+}
+
+fn beijing_now() -> chrono::DateTime<FixedOffset> {
+    Local::now().with_timezone(&beijing_offset())
+}
+
+fn parse_beijing_time(ts: &str) -> Option<chrono::DateTime<FixedOffset>> {
+    for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"] {
+        if let Ok(t) = chrono::NaiveDateTime::parse_from_str(ts, fmt) {
+            return t.and_local_timezone(beijing_offset()).single();
+        }
+    }
+    None
+}
+
+fn remaining_ms_until(target: &chrono::DateTime<FixedOffset>, current_offset: &AtomicI64) -> i64 {
     let offset_val = current_offset.load(Ordering::Relaxed);
     let target_with_offset = target.clone() - chrono::Duration::milliseconds(offset_val);
-    (target_with_offset - Local::now()).num_milliseconds()
+    (target_with_offset - beijing_now()).num_milliseconds()
 }
 
 async fn wait_until_task_time(
@@ -90,7 +111,7 @@ async fn wait_until_task_time(
     task_id: &str,
     stop_flag: &AtomicBool,
     current_offset: &AtomicI64,
-    target: &chrono::DateTime<Local>,
+    target: &chrono::DateTime<FixedOffset>,
     stopped_message: &str,
 ) -> bool {
     loop {
@@ -128,7 +149,7 @@ pub async fn start_buy_task(
     time_start: Option<String>,
     proxy: Option<String>,
     time_offset: Option<f64>,
-    ntp_server: Option<String>,
+    _ntp_server: Option<String>,
     base_dir: std::path::PathBuf,
 ) -> Result<()> {
     emit_log(&window, &task_id, "Starting buy task...");
@@ -172,21 +193,13 @@ pub async fn start_buy_task(
     if let Some(ts) = &time_start {
         emit_log(&window, &task_id, &format!("Scheduled start time: {}", ts));
         
-        // Parse start time
-        // Try different formats
-        let target_time = if let Ok(t) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S") {
-            Some(t.and_local_timezone(Local).unwrap())
-        } else if let Ok(t) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S") {
-            Some(t.and_local_timezone(Local).unwrap())
-        } else {
-            None
-        };
+        let target_time = parse_beijing_time(ts);
 
         if let Some(target) = target_time {
             let initial_offset = current_offset.load(Ordering::Relaxed);
             let offset_clone = current_offset.clone();
+            let target_for_sync = target.clone();
             let stop_flag_clone = stop_flag.clone();
-            let ntp_server_clone = ntp_server.clone();
             let task_id_clone = task_id.clone();
             let window_clone = window.clone(); // Tauri windows are cheap to clone (handle)
             let time_client_clone = client.clone();
@@ -194,28 +207,35 @@ pub async fn start_buy_task(
             // Spawn background sync task
             tokio::spawn(async move {
                 let sync_interval = Duration::from_secs(10);
+                let mut pending_offset: Option<i64> = None;
                 loop {
                     if stop_flag_clone.load(Ordering::Relaxed) { break; }
                     sleep(sync_interval).await;
-                    
-                    let url = ntp_server_clone.clone().unwrap_or_else(|| api::DEFAULT_TIME_SERVER.to_string());
-                    let ntp_url = url.clone();
-                    let sync_result = if url.starts_with("http") {
-                        api::get_server_time(&time_client_clone, Some(url.clone())).await
-                    } else {
-                        // Wrap blocking NTP call in spawn_blocking to avoid blocking the async runtime
-                        let ntp_url_owned = ntp_url.clone();
-                        tokio::task::spawn_blocking(move || {
-                            api::get_ntp_time(&ntp_url_owned).map(|t| t as i64)
-                        }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("Task join error: {}", e)))
-                    };
 
-                    match sync_result {
-                        Ok(server_time) => {
-                            let local_time = api::get_local_time();
-                            let new_offset = server_time - local_time;
-                            offset_clone.store(new_offset, Ordering::Relaxed);
-                            // Log occasionally or just debug? Keeping it quiet to avoid log spam, or use debug!
+                    if remaining_ms_until(&target_for_sync, offset_clone.as_ref()) <= TIME_SYNC_FREEZE_BEFORE_START_MS {
+                        break;
+                    }
+
+                    match api::sample_time(&time_client_clone, api::DEFAULT_TIME_SERVER).await {
+                        Ok(result) => {
+                            let new_offset = result.diff;
+                            let old_offset = offset_clone.load(Ordering::Relaxed);
+                            if (new_offset - old_offset).abs() > TIME_SYNC_OFFSET_JUMP_WARN_MS {
+                                if pending_offset
+                                    .map(|pending| (new_offset - pending).abs() <= TIME_SYNC_OFFSET_JUMP_WARN_MS)
+                                    .unwrap_or(false)
+                                {
+                                    offset_clone.store(new_offset, Ordering::Relaxed);
+                                    pending_offset = None;
+                                    emit_log(&window_clone, &task_id_clone, &format!("Background sync accepted offset jump: {}ms", new_offset));
+                                } else {
+                                    pending_offset = Some(new_offset);
+                                    emit_log(&window_clone, &task_id_clone, &format!("Background sync offset jump ignored once: {}ms -> {}ms", old_offset, new_offset));
+                                }
+                            } else {
+                                offset_clone.store(new_offset, Ordering::Relaxed);
+                                pending_offset = None;
+                            }
                         },
                         Err(e) => {
                              emit_log(&window_clone, &task_id_clone, &format!("Background sync failed: {}", e));
@@ -223,7 +243,6 @@ pub async fn start_buy_task(
                     }
                 }
             });
-
             let preheat_time = target.clone() - chrono::Duration::minutes(3);
             emit_log(&window, &task_id, &format!(
                 "Waiting until preheat: {} (Sale time: {}, Initial Offset: {}ms)",
@@ -479,7 +498,7 @@ pub async fn start_buy_task(
                             order_id: order_id.to_string(),
                             project_name: info.project_name.clone().unwrap_or(info.project_id.clone()),
                             price: info.pay_money.unwrap_or(0),
-                            time: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                            time: beijing_now().format("%Y-%m-%d %H:%M:%S").to_string(),
                             pay_url: pay_url_str,
                         };
                         if let Err(e) = storage::add_history_item(&base_dir, history_item) {
@@ -554,4 +573,20 @@ pub async fn start_buy_task(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Timelike;
+
+    #[test]
+    fn parses_scheduled_time_as_beijing_time() {
+        let parsed = parse_beijing_time("2026-06-19 12:34:56").unwrap();
+
+        assert_eq!(parsed.offset().local_minus_utc(), BEIJING_OFFSET_SECONDS);
+        assert_eq!(parsed.hour(), 12);
+        assert_eq!(parsed.minute(), 34);
+        assert_eq!(parsed.second(), 56);
+    }
 }
