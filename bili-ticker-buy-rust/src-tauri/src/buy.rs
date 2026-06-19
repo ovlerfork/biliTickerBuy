@@ -79,6 +79,44 @@ fn emit_log(window: &Window, task_id: &str, message: &str) {
     info!("[{}] {}", task_id, message);
 }
 
+fn remaining_ms_until(target: &chrono::DateTime<Local>, current_offset: &AtomicI64) -> i64 {
+    let offset_val = current_offset.load(Ordering::Relaxed);
+    let target_with_offset = target.clone() - chrono::Duration::milliseconds(offset_val);
+    (target_with_offset - Local::now()).num_milliseconds()
+}
+
+async fn wait_until_task_time(
+    window: &Window,
+    task_id: &str,
+    stop_flag: &AtomicBool,
+    current_offset: &AtomicI64,
+    target: &chrono::DateTime<Local>,
+    stopped_message: &str,
+) -> bool {
+    loop {
+        if stop_flag.load(Ordering::Relaxed) {
+            emit_log(window, task_id, stopped_message);
+            return false;
+        }
+
+        let remaining_ms = remaining_ms_until(target, current_offset);
+
+        if remaining_ms <= 0 {
+            return true;
+        }
+
+        if remaining_ms > 5000 {
+            sleep(Duration::from_secs(1)).await;
+        } else if remaining_ms > 1000 {
+            sleep(Duration::from_millis(100)).await;
+        } else if remaining_ms > 50 {
+            sleep(Duration::from_millis(10)).await;
+        } else {
+            sleep(Duration::from_millis(1)).await;
+        }
+    }
+}
+
 pub async fn start_buy_task(
     window: Window, 
     task_id: String,
@@ -128,6 +166,8 @@ pub async fn start_buy_task(
     }
 
     let client = client_builder.build()?;
+    let current_offset = Arc::new(AtomicI64::new(time_offset.unwrap_or(0.0) as i64));
+    let mut scheduled_target = None;
     
     if let Some(ts) = &time_start {
         emit_log(&window, &task_id, &format!("Scheduled start time: {}", ts));
@@ -143,8 +183,7 @@ pub async fn start_buy_task(
         };
 
         if let Some(target) = target_time {
-            let initial_offset = time_offset.unwrap_or(0.0) as i64;
-            let current_offset = Arc::new(AtomicI64::new(initial_offset));
+            let initial_offset = current_offset.load(Ordering::Relaxed);
             let offset_clone = current_offset.clone();
             let stop_flag_clone = stop_flag.clone();
             let ntp_server_clone = ntp_server.clone();
@@ -184,40 +223,28 @@ pub async fn start_buy_task(
                     }
                 }
             });
-            
-            emit_log(&window, &task_id, &format!("Waiting until: {} (Initial Offset: {}ms)", target.format("%Y-%m-%d %H:%M:%S%.3f"), initial_offset));
 
-            loop {
-                if stop_flag.load(Ordering::Relaxed) {
-                    emit_log(&window, &task_id, "Task stopped by user while waiting.");
-                    return Ok(());
-                }
+            let preheat_time = target.clone() - chrono::Duration::minutes(3);
+            emit_log(&window, &task_id, &format!(
+                "Waiting until preheat: {} (Sale time: {}, Initial Offset: {}ms)",
+                preheat_time.format("%Y-%m-%d %H:%M:%S%.3f"),
+                target.format("%Y-%m-%d %H:%M:%S%.3f"),
+                initial_offset
+            ));
 
-                let now = Local::now();
-                let offset_val = current_offset.load(Ordering::Relaxed);
-                let target_with_offset = target - chrono::Duration::milliseconds(offset_val);
-                
-                let diff = target_with_offset - now;
-                let remaining_ms = diff.num_milliseconds();
-                
-                if remaining_ms <= 0 {
-                    break;
-                }
-
-                // Adaptive sleep strategy for high precision
-                if remaining_ms > 5000 {
-                    sleep(Duration::from_secs(1)).await;
-                } else if remaining_ms > 1000 {
-                    sleep(Duration::from_millis(100)).await;
-                } else if remaining_ms > 50 {
-                    sleep(Duration::from_millis(10)).await;
-                } else {
-                    // Use tokio::time::sleep for the last 50ms — avoids CPU burn
-                    // while still yielding to the async runtime for precise timing
-                    sleep(Duration::from_millis(1)).await;
-                }
+            if !wait_until_task_time(
+                &window,
+                &task_id,
+                stop_flag.as_ref(),
+                current_offset.as_ref(),
+                &preheat_time,
+                "Task stopped by user while waiting for preheat.",
+            ).await {
+                return Ok(());
             }
-            emit_log(&window, &task_id, "Time reached! Starting execution...");
+
+            emit_log(&window, &task_id, "Preheat time reached! Preparing order...");
+            scheduled_target = Some(target);
         } else {
              emit_log(&window, &task_id, "Invalid time format. Starting immediately.");
         }
@@ -275,9 +302,14 @@ pub async fn start_buy_task(
 
         if res_json["errno"].as_i64().unwrap_or(-1) != 0 && res_json["code"].as_i64().unwrap_or(-1) != 0 {
             let errno = res_json["errno"].as_i64().or(res_json["code"].as_i64()).unwrap_or(-1);
+            let before_sale = scheduled_target
+                .as_ref()
+                .map(|target| remaining_ms_until(target, current_offset.as_ref()) > 0)
+                .unwrap_or(false);
+
             emit_log(&window, &task_id, &format!("Prepare failed: {} ({}) | Msg: {}", errno, get_error_message(errno), res_json["msg"]));
             sleep(Duration::from_millis(interval)).await;
-            if mode == 1 {
+            if mode == 1 && !before_sale {
                 left_time -= 1;
                 if left_time <= 0 {
                     is_running = false;
@@ -296,6 +328,25 @@ pub async fn start_buy_task(
 
         let token = res_json["data"]["token"].as_str().unwrap_or("").to_string();
         let ptoken = res_json["data"]["ptoken"].as_str().unwrap_or("").replace('=', "");
+
+        if let Some(target) = &scheduled_target {
+            if remaining_ms_until(target, current_offset.as_ref()) > 0 {
+                emit_log(&window, &task_id, &format!("Preheat complete. Waiting until sale time: {}", target.format("%Y-%m-%d %H:%M:%S%.3f")));
+
+                if !wait_until_task_time(
+                    &window,
+                    &task_id,
+                    stop_flag.as_ref(),
+                    current_offset.as_ref(),
+                    target,
+                    "Task stopped by user while waiting for sale time.",
+                ).await {
+                    return Ok(());
+                }
+
+                emit_log(&window, &task_id, "Time reached! Starting execution...");
+            }
+        }
         
         emit_log(&window, &task_id, "2) Creating order...");
         
