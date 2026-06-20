@@ -178,6 +178,17 @@ async fn invoke(state: Arc<AppState>, req: InvokeRequest) -> Result<Value, Strin
             .map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
+        "get_tasks" => to_value(storage::get_tasks(&state.base_dir)),
+        "save_tasks" => {
+            storage::save_tasks(&state.base_dir, &req.args["tasks"]).map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "get_settings" => to_value(storage::get_settings(&state.base_dir)),
+        "save_settings" => {
+            storage::save_settings(&state.base_dir, &req.args["settings"])
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
         "get_user_info" => api::fetch_user_info(&state.http_client, arg_cookies(&req.args)?)
             .await
             .map_err(|e| e.to_string()),

@@ -149,11 +149,35 @@ const sanitizeBuyer = (buyer, fallbackTel = "") => {
 // ponytail: cap live renderer logs; add persisted full-log viewing only if users need it.
 const TASK_LOG_LIMIT = 80;
 const TASK_LOG_RENDER_LIMIT = 40;
+const RESTART_LOST_TASK_STATUSES = new Set(["running", "scheduled"]);
+const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+
+const restorePersistedTasks = (items) => {
+    if (!Array.isArray(items)) return [];
+
+    return items
+        .filter(task => task && typeof task === "object")
+        .map(task => {
+            if (!RESTART_LOST_TASK_STATUSES.has(task.status)) return task;
+
+            const restartLog = {
+                time: formatBeijingTime(new Date()),
+                message: "应用已重启，原运行任务已停止；如需继续请重新启动"
+            };
+            return {
+                ...task,
+                status: "stopped",
+                logs: [...(task.logs || []), restartLog].slice(-TASK_LOG_LIMIT),
+                lastLog: restartLog.message
+            };
+        });
+};
 
 function App() {
     const [activeTab, setActiveTab] = useState("run");
     const [tasks, setTasks] = useState([]);
     const [viewMode, setViewMode] = useState("list");
+    const tasksLoadedRef = useRef(false);
 
     // Account State
     const [accounts, setAccounts] = useState([]);
@@ -292,19 +316,14 @@ function App() {
                 setRecentInputs(JSON.parse(saved));
             } catch (e) { }
         }
-
-        const savedSettings = localStorage.getItem("bili_settings");
-        if (savedSettings) {
-            try {
-                const settings = JSON.parse(savedSettings);
-                if (settings.proxy) setProxy(settings.proxy);
-                if (settings.notifications) setNotifications(settings.notifications);
-                if (settings.syncInterval) setSyncInterval(settings.syncInterval);
-                // timeOffset is usually synced on startup, but we can load it too if needed
-                // if (settings.timeOffset) updateTimeOffset(settings.timeOffset);
-            } catch (e) { }
-        }
     }, []);
+
+    useEffect(() => {
+        if (!tasksLoadedRef.current) return;
+        invoke("save_tasks", { tasks }).catch(e => {
+            console.error("Failed to save tasks", e);
+        });
+    }, [tasks]);
 
     const hasScheduledTask = tasks.some(t => t.status === 'scheduled');
 
@@ -471,8 +490,64 @@ function App() {
         await loadAccounts();
         await loadHistory();
         await loadProjectHistory(); // New
+        await loadSettings();
+        await loadTasks();
         // 启动时只同步一次时间
         await syncTime(true);
+    }
+
+    function applySettings(settings) {
+        if (!settings || typeof settings !== "object") return false;
+
+        if (hasOwn(settings, "proxy")) setProxy(settings.proxy || "");
+        if (settings.notifications && typeof settings.notifications === "object") {
+            setNotifications(prev => ({ ...prev, ...settings.notifications }));
+        }
+        if (hasOwn(settings, "syncInterval")) {
+            const interval = Number(settings.syncInterval);
+            setSyncInterval(Number.isFinite(interval) ? interval : 0);
+        }
+        if (hasOwn(settings, "timeOffset")) {
+            updateTimeOffset(settings.timeOffset);
+        }
+        return true;
+    }
+
+    async function loadSettings() {
+        try {
+            const settings = await invoke("get_settings");
+            if (settings && Object.keys(settings).length > 0) {
+                applySettings(settings);
+                return;
+            }
+        } catch (e) {
+            console.error("Failed to load settings", e);
+        }
+
+        const savedSettings = localStorage.getItem("bili_settings");
+        if (!savedSettings) return;
+
+        try {
+            const settings = JSON.parse(savedSettings);
+            if (applySettings(settings)) {
+                invoke("save_settings", { settings }).catch(e => {
+                    console.error("Failed to migrate settings", e);
+                });
+            }
+        } catch (e) {
+            console.error("Failed to parse local settings", e);
+        }
+    }
+
+    async function loadTasks() {
+        try {
+            const savedTasks = await invoke("get_tasks");
+            setTasks(restorePersistedTasks(savedTasks));
+        } catch (e) {
+            console.error("Failed to load tasks", e);
+        } finally {
+            tasksLoadedRef.current = true;
+        }
     }
 
     async function loadProjectHistory() {
@@ -1369,6 +1444,23 @@ function App() {
         }
     }
 
+    function clearFinishedTasks() {
+        const finishedIds = new Set(
+            tasks
+                .filter(t => t.status === "success" || t.status === "stopped")
+                .map(t => t.id)
+        );
+
+        setTasks(prev => prev.filter(t => !finishedIds.has(t.id)));
+        setVisibleTaskLogLines(prev => {
+            const next = { ...prev };
+            for (const taskId of finishedIds) {
+                delete next[taskId];
+            }
+            return next;
+        });
+    }
+
     async function handleBatchUpdateTime() {
         const newTime = prompt("请输入新的开始时间 (格式: YYYY-MM-DD HH:mm:ss)", timeStart || "");
         if (!newTime) return;
@@ -1483,15 +1575,20 @@ function App() {
     const hiddenGlobalLogCount = Math.max(0, logs.length - globalVisibleLogs.length);
     const globalLogStartIndex = logs.length - globalVisibleLogs.length;
 
-    function handleSaveSettings() {
+    async function handleSaveSettings() {
         const settings = {
             proxy,
             notifications,
             timeOffset,
             syncInterval
         };
-        localStorage.setItem("bili_settings", JSON.stringify(settings));
-        alert("设置已保存");
+        try {
+            await invoke("save_settings", { settings });
+            localStorage.setItem("bili_settings", JSON.stringify(settings));
+            alert("设置已保存");
+        } catch (e) {
+            alert("保存设置失败: " + (e.message || e));
+        }
     }
 
     async function handleTestPush(type) {
@@ -1828,7 +1925,7 @@ function App() {
                                             </div>
                                         </button>
                                     </div>
-                                    <button onClick={() => { setTasks([]); setVisibleTaskLogLines({}); }} className="text-sm text-gray-500 hover:text-white">
+                                    <button onClick={clearFinishedTasks} className="text-sm text-gray-500 hover:text-white">
                                         清空已完成任务
                                     </button>
                                 </div>

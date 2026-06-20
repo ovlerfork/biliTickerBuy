@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fs;
 use std::path::Path;
 
@@ -148,6 +149,48 @@ pub fn remove_project_history_item(
     history.retain(|p| !(p.project_id == project_id && p.sku_id == sku_id));
     let path = base_dir.join("project_history.json");
     let json = serde_json::to_string_pretty(&history)?;
+    atomic_write(&path, &json)
+}
+
+pub fn get_tasks(base_dir: &Path) -> Result<Value> {
+    let path = base_dir.join("tasks.json");
+    if path.exists() {
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read tasks file: {:?}", path))?;
+        Ok(serde_json::from_str(&content).unwrap_or_else(|_| Value::Array(vec![])))
+    } else {
+        Ok(Value::Array(vec![]))
+    }
+}
+
+pub fn save_tasks(base_dir: &Path, tasks: &Value) -> Result<()> {
+    if !tasks.is_array() {
+        anyhow::bail!("tasks must be an array");
+    }
+
+    let path = base_dir.join("tasks.json");
+    let json = serde_json::to_string_pretty(tasks)?;
+    atomic_write(&path, &json)
+}
+
+pub fn get_settings(base_dir: &Path) -> Result<Value> {
+    let path = base_dir.join("settings.json");
+    if path.exists() {
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read settings file: {:?}", path))?;
+        Ok(serde_json::from_str(&content).unwrap_or_else(|_| Value::Object(Default::default())))
+    } else {
+        Ok(Value::Object(Default::default()))
+    }
+}
+
+pub fn save_settings(base_dir: &Path, settings: &Value) -> Result<()> {
+    if !settings.is_object() {
+        anyhow::bail!("settings must be an object");
+    }
+
+    let path = base_dir.join("settings.json");
+    let json = serde_json::to_string_pretty(settings)?;
     atomic_write(&path, &json)
 }
 

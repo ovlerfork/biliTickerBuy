@@ -213,6 +213,30 @@ fn remove_project_history(
 }
 
 #[tauri::command]
+fn get_tasks(app_handle: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let dir = get_app_dir(&app_handle);
+    storage::get_tasks(&dir).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_tasks(app_handle: tauri::AppHandle, tasks: serde_json::Value) -> Result<(), String> {
+    let dir = get_app_dir(&app_handle);
+    storage::save_tasks(&dir, &tasks).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_settings(app_handle: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let dir = get_app_dir(&app_handle);
+    storage::get_settings(&dir).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_settings(app_handle: tauri::AppHandle, settings: serde_json::Value) -> Result<(), String> {
+    let dir = get_app_dir(&app_handle);
+    storage::save_settings(&dir, &settings).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn get_user_info(
     state: tauri::State<'_, AppState>,
     cookies: Vec<String>,
@@ -558,6 +582,10 @@ fn main() {
             get_project_history,
             add_project_history,
             remove_project_history,
+            get_tasks,
+            save_tasks,
+            get_settings,
+            save_settings,
             open_bilibili_home,
             export_cookie,
             import_cookie
