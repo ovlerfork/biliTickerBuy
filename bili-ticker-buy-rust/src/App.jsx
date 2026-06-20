@@ -10,6 +10,9 @@ const DEFAULT_VISIBLE_LOG_LINES = 100;
 const LOG_BUFFER_LIMIT = 1000;
 const SYNC_TIME_TIMEOUT_MS = 18000;
 const DEFAULT_TIME_SERVER = "ntp.aliyun.com";
+const STRATEGY_AUTO = "auto";
+const STRATEGY_OPENING = "opening";
+const STRATEGY_REFLOW = "reflow";
 
 const appendLogLine = (lines, line) => [...lines, line].slice(-LOG_BUFFER_LIMIT);
 const logTime = (log) => typeof log === "string" ? "" : log.time;
@@ -44,6 +47,10 @@ const formatBeijingTimeWithMs = (date) => {
     return `${time}.${date.getMilliseconds().toString().padStart(3, "0")}`;
 };
 const formatBeijingTime = (date) => formatBeijingDateTime(date).split(" ")[1];
+const normalizeStrategyMode = (value) => {
+    if (value === STRATEGY_OPENING || value === STRATEGY_REFLOW) return value;
+    return STRATEGY_AUTO;
+};
 const getSyncQualityIssue = (quality) => {
     if (!quality) return null;
     if (Number(quality.sample_count || 0) < 2) return "有效时间样本不足";
@@ -222,6 +229,7 @@ function App() {
 
     const [timeStart, setTimeStart] = useState("");
     const [requestInterval, setRequestInterval] = useState(1000);
+    const [strategyMode, setStrategyMode] = useState(STRATEGY_AUTO);
     const [mode, setMode] = useState(0); // 0: infinite, 1: finite
     const [totalAttempts, setTotalAttempts] = useState(10);
 
@@ -851,6 +859,7 @@ function App() {
             buyerAddresses,
             timeStart,
             interval: requestInterval,
+            strategyMode,
             mode,
             totalAttempts,
             proxy,
@@ -894,6 +903,7 @@ function App() {
 
                 if (config.timeStart) setTimeStart(config.timeStart);
                 if (config.interval) setRequestInterval(config.interval);
+                setStrategyMode(normalizeStrategyMode(config.strategyMode));
                 if (config.mode !== undefined) setMode(config.mode);
                 if (config.totalAttempts) setTotalAttempts(config.totalAttempts);
                 if (config.proxy) setProxy(config.proxy);
@@ -1240,6 +1250,7 @@ function App() {
         return {
             ticketInfo: finalTicketInfo,
             interval: parseInt(requestInterval),
+            strategyMode,
             mode: parseInt(mode),
             totalAttempts: parseInt(totalAttempts),
             timeStart,
@@ -1301,44 +1312,62 @@ function App() {
             setLogs(prev => appendLogLine(prev, `正在启动任务，共 ${selectedBuyers.length} 个购票人...`));
 
             try {
-                // Bundle all buyers into one task
-                const args = prepareTaskPayload(); // No args = use all selectedBuyers
-                args.timeOffset = parseFloat(currentOffset);
-
-                setLogs(prev => appendLogLine(prev, `请求参数: ${args.ticketInfo}`));
-
-                let parsedTicket = null;
-                try {
-                    parsedTicket = JSON.parse(args.ticketInfo);
-                } catch (err) {
-                    console.warn("无法解析 ticketInfo", err);
+                const shouldSplitReflow = strategyMode === STRATEGY_REFLOW && selectedBuyers.length > 1;
+                const taskPayloads = shouldSplitReflow
+                    ? selectedBuyers.map(buyer => prepareTaskPayload(buyer, buyerAddresses[String(buyer.id)]))
+                    : [prepareTaskPayload()];
+                if (shouldSplitReflow) {
+                    setLogs(prev => appendLogLine(prev, "回流模式已按购票人拆分任务"));
                 }
 
-                // Call backend
-                const taskId = await invoke("start_buy", args);
-                console.debug("start_buy invoked", {
-                    taskId,
-                    contactTel: parsedTicket?.contact_tel,
-                    buyerInfo: parsedTicket?.buyer_info
+                const startedTasks = [];
+                let parsedTicket = null;
+                for (const args of taskPayloads) {
+                    args.timeOffset = parseFloat(currentOffset);
+
+                    setLogs(prev => appendLogLine(prev, `请求参数: ${args.ticketInfo}`));
+
+                    try {
+                        parsedTicket = JSON.parse(args.ticketInfo);
+                    } catch (err) {
+                        console.warn("无法解析 ticketInfo", err);
+                    }
+
+                    const taskId = await invoke("start_buy", args);
+                    console.debug("start_buy invoked", {
+                        taskId,
+                        contactTel: parsedTicket?.contact_tel,
+                        buyerInfo: parsedTicket?.buyer_info,
+                        strategyMode: args.strategyMode
+                    });
+
+                    startedTasks.push({
+                        id: taskId,
+                        args,
+                        parsedTicket
+                    });
+                }
+
+                const newTasks = startedTasks.map(({ id, args, parsedTicket }) => {
+                    const buyersForTask = parsedTicket?.buyer_info || selectedBuyers;
+                    return {
+                        id,
+                        project: projectInfo?.name || projectId,
+                        screen: selectedScreen?.name || "Default",
+                        sku: selectedSku?.desc || "Default",
+                        buyerCount: buyersForTask.length || selectedBuyers.length,
+                        buyers: buyersForTask,
+                        startTime: timeStart || formatBeijingTime(new Date()),
+                        status: timeStart ? "scheduled" : "running",
+                        logs: [syncLog],
+                        lastLog: timeStart ? `Waiting for ${timeStart}` : `Starting for ${buyersForTask.length || selectedBuyers.length} buyers...`,
+                        paymentUrl: "",
+                        accountName: userInfo?.uname || "Unknown",
+                        args
+                    };
                 });
 
-                const newTask = {
-                    id: taskId,
-                    project: projectInfo?.name || projectId,
-                    screen: selectedScreen?.name || "Default",
-                    sku: selectedSku?.desc || "Default",
-                    buyerCount: selectedBuyers.length,
-                    buyers: selectedBuyers, // Store all buyers
-                    startTime: timeStart || formatBeijingTime(new Date()),
-                    status: timeStart ? "scheduled" : "running",
-                    logs: [syncLog],
-                    lastLog: timeStart ? `Waiting for ${timeStart}` : `Starting for ${selectedBuyers.length} buyers...`,
-                    paymentUrl: "",
-                    accountName: userInfo?.uname || "Unknown",
-                    args: args
-                };
-
-                setTasks(prev => [newTask, ...prev]);
+                setTasks(prev => [...newTasks, ...prev]);
                 setLogs(prev => appendLogLine(prev, `✅ 任务已启动`));
                 if (selectedBuyers.length > 1) {
                     setViewMode("grid");
@@ -2600,6 +2629,27 @@ function App() {
                                                     onChange={(e) => setTotalAttempts(e.target.value)}
                                                     disabled={mode === 0}
                                                 />
+                                            </div>
+                                        </div>
+
+                                        <div>
+                                            <label className="block text-sm font-medium text-gray-400 mb-2">策略模式</label>
+                                            <div className="grid grid-cols-3 gap-3">
+                                                <label className={`cursor-pointer p-3 rounded-lg border ${strategyMode === STRATEGY_AUTO ? 'bg-blue-600/20 border-blue-500' : 'bg-gray-900 border-gray-700'}`}>
+                                                    <input type="radio" name="strategyMode" className="hidden" checked={strategyMode === STRATEGY_AUTO} onChange={() => setStrategyMode(STRATEGY_AUTO)} />
+                                                    <div className="font-bold text-sm">自动</div>
+                                                    <div className="text-xs text-gray-400">按时间判断</div>
+                                                </label>
+                                                <label className={`cursor-pointer p-3 rounded-lg border ${strategyMode === STRATEGY_OPENING ? 'bg-blue-600/20 border-blue-500' : 'bg-gray-900 border-gray-700'}`}>
+                                                    <input type="radio" name="strategyMode" className="hidden" checked={strategyMode === STRATEGY_OPENING} onChange={() => setStrategyMode(STRATEGY_OPENING)} />
+                                                    <div className="font-bold text-sm">开票</div>
+                                                    <div className="text-xs text-gray-400">到点后请求</div>
+                                                </label>
+                                                <label className={`cursor-pointer p-3 rounded-lg border ${strategyMode === STRATEGY_REFLOW ? 'bg-blue-600/20 border-blue-500' : 'bg-gray-900 border-gray-700'}`}>
+                                                    <input type="radio" name="strategyMode" className="hidden" checked={strategyMode === STRATEGY_REFLOW} onChange={() => setStrategyMode(STRATEGY_REFLOW)} />
+                                                    <div className="font-bold text-sm">回流</div>
+                                                    <div className="text-xs text-gray-400">长期探测</div>
+                                                </label>
                                             </div>
                                         </div>
 

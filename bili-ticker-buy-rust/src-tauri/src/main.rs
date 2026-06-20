@@ -321,6 +321,7 @@ async fn start_buy(
     time_offset: Option<f64>,
     buyers: Option<Vec<serde_json::Value>>,
     ntp_server: Option<String>,
+    strategy_mode: Option<String>,
 ) -> Result<String, String> {
     // Filter out empty time_start
     let time_start = time_start.filter(|s| !s.trim().is_empty());
@@ -398,6 +399,7 @@ async fn start_buy(
             proxy,
             time_offset,
             ntp_server,
+            strategy_mode,
             app_dir,
         )
         .await

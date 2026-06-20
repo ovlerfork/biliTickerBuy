@@ -2,7 +2,7 @@ use crate::api; // Import api module
 use crate::storage::{self, HistoryItem};
 use crate::util::CTokenGenerator;
 use anyhow::Result;
-use chrono::{FixedOffset, Local};
+use chrono::{FixedOffset, Local, Timelike};
 use log::info;
 use reqwest::cookie::Jar;
 use reqwest::{Client, Proxy, Url};
@@ -16,6 +16,12 @@ use tokio::time::sleep;
 const BEIJING_OFFSET_SECONDS: i32 = 8 * 60 * 60;
 const TIME_SYNC_FREEZE_BEFORE_START_MS: i64 = 2000;
 const TIME_SYNC_OFFSET_JUMP_WARN_MS: i64 = 300;
+const OPENING_BURST_WINDOW_MS: u128 = 20_000;
+const OPENING_MIN_INTERVAL_MS: u64 = 250;
+const RECHECK_412_RESET_MS: u128 = 30 * 60 * 1000;
+const RECHECK_412_ESCALATE_MS: u128 = 10 * 60 * 1000;
+const FIRST_412_COOLDOWN_MS: u64 = 60_000;
+const REPEATED_412_COOLDOWN_MS: u64 = 300_000;
 
 /// Error code dictionary from the original Python project
 /// Maps error codes to human-readable messages
@@ -25,6 +31,10 @@ fn get_error_message(errno: i64) -> &'static str {
         3 => "抢票CD中",
         100001 => "无票",
         100003 => "验证码过期",
+        429 => "请求异常 429",
+        412 => "请求异常 412",
+        219 => "购票暂不可用",
+        221 => "购票暂不可用",
         100009 => "库存不足,暂无余票",
         100016 => "项目不可售",
         100017 => "票种不可售",
@@ -36,6 +46,273 @@ fn get_error_message(errno: i64) -> &'static str {
         900001 => "当前拥挤，请稍后再试",
         900002 => "当前拥挤，请稍后再试",
         _ => "未知错误码",
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrategyMode {
+    Auto,
+    Opening,
+    Reflow,
+}
+
+impl StrategyMode {
+    pub fn from_option(value: Option<&str>) -> Self {
+        match value.unwrap_or("auto").trim().to_lowercase().as_str() {
+            "opening" | "sale" | "start" => Self::Opening,
+            "reflow" | "return" | "refund" => Self::Reflow,
+            _ => Self::Auto,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "自动",
+            Self::Opening => "开票",
+            Self::Reflow => "回流",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveStrategy {
+    Opening,
+    Reflow,
+}
+
+impl ActiveStrategy {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Opening => "开票",
+            Self::Reflow => "回流",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestPhase {
+    Prepare,
+    Create,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttemptOutcome {
+    Code(i64),
+    NetworkError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrepareGateDecision {
+    allowed: bool,
+    remaining_ms: i64,
+}
+
+fn prepare_gate_decision(remaining_ms: i64) -> PrepareGateDecision {
+    PrepareGateDecision {
+        allowed: remaining_ms <= 0,
+        remaining_ms,
+    }
+}
+
+fn resolve_active_strategy(
+    requested: StrategyMode,
+    scheduled_was_future: bool,
+) -> ActiveStrategy {
+    match requested {
+        StrategyMode::Opening => ActiveStrategy::Opening,
+        StrategyMode::Reflow => ActiveStrategy::Reflow,
+        StrategyMode::Auto => {
+            if scheduled_was_future {
+                ActiveStrategy::Opening
+            } else {
+                ActiveStrategy::Reflow
+            }
+        }
+    }
+}
+
+fn clamp_interval(value: u64, min: u64, max: u64) -> u64 {
+    value.max(min).min(max)
+}
+
+fn jittered_interval(base_ms: u64) -> u64 {
+    let jitter = rand::random::<u64>() % 81;
+    base_ms.saturating_add(jitter)
+}
+
+fn daytime_reflow_base_interval(base_interval_ms: u64) -> u64 {
+    let hour = beijing_now().hour();
+    if (8..24).contains(&hour) {
+        clamp_interval(base_interval_ms, 250, 1_500)
+    } else {
+        clamp_interval(base_interval_ms.max(1_500), 1_500, 5_000)
+    }
+}
+
+fn precise_interval_sleep_duration(start: Instant, interval_ms: u64) -> Option<Duration> {
+    let interval_duration = Duration::from_millis(interval_ms);
+    let elapsed = start.elapsed();
+    if elapsed < interval_duration {
+        Some(interval_duration - elapsed)
+    } else {
+        None
+    }
+}
+
+async fn sleep_with_stop(stop_flag: &AtomicBool, duration: Duration) -> bool {
+    let mut remaining = duration;
+    while !remaining.is_zero() {
+        if stop_flag.load(Ordering::Relaxed) {
+            return false;
+        }
+
+        let step = remaining.min(Duration::from_millis(500));
+        sleep(step).await;
+        remaining = remaining.saturating_sub(step);
+    }
+    !stop_flag.load(Ordering::Relaxed)
+}
+
+#[derive(Debug)]
+struct AdaptiveDelayController {
+    strategy: ActiveStrategy,
+    base_interval_ms: u64,
+    consecutive_429: u32,
+    consecutive_network_errors: u32,
+    last_412_at: Option<Instant>,
+    opening_started_at: Instant,
+    last_interval_ms: u64,
+}
+
+impl AdaptiveDelayController {
+    fn new(strategy: ActiveStrategy, base_interval_ms: u64) -> Self {
+        let base_interval_ms = base_interval_ms.max(1);
+        Self {
+            strategy,
+            base_interval_ms,
+            consecutive_429: 0,
+            consecutive_network_errors: 0,
+            last_412_at: None,
+            opening_started_at: Instant::now(),
+            last_interval_ms: base_interval_ms,
+        }
+    }
+
+    fn next_delay(&mut self, phase: RequestPhase, outcome: AttemptOutcome) -> Duration {
+        let interval_ms = self.next_delay_ms(phase, outcome);
+        self.last_interval_ms = interval_ms;
+        Duration::from_millis(interval_ms)
+    }
+
+    fn next_delay_ms(&mut self, phase: RequestPhase, outcome: AttemptOutcome) -> u64 {
+        match outcome {
+            AttemptOutcome::Code(429) => {
+                self.consecutive_429 = self.consecutive_429.saturating_add(1);
+                self.consecutive_network_errors = 0;
+            }
+            AttemptOutcome::NetworkError => {
+                self.consecutive_network_errors =
+                    self.consecutive_network_errors.saturating_add(1);
+            }
+            _ => {
+                self.consecutive_429 = 0;
+                self.consecutive_network_errors = 0;
+            }
+        }
+
+        if let AttemptOutcome::Code(412) = outcome {
+            return self.next_412_cooldown_ms();
+        }
+
+        match self.strategy {
+            ActiveStrategy::Opening => self.opening_delay_ms(phase, outcome),
+            ActiveStrategy::Reflow => self.reflow_delay_ms(phase, outcome),
+        }
+    }
+
+    fn opening_delay_ms(&self, _phase: RequestPhase, outcome: AttemptOutcome) -> u64 {
+        match outcome {
+            AttemptOutcome::Code(900001) | AttemptOutcome::Code(900002) => 1_000,
+            AttemptOutcome::Code(219) | AttemptOutcome::Code(221) => 5_000,
+            AttemptOutcome::Code(100051) => 0,
+            AttemptOutcome::Code(100009) => {
+                if self.in_opening_burst() {
+                    clamp_interval(self.base_interval_ms, OPENING_MIN_INTERVAL_MS, 1_000)
+                } else {
+                    clamp_interval(self.base_interval_ms.max(1_000), 1_000, 3_000)
+                }
+            }
+            AttemptOutcome::Code(429) => {
+                let extra = (self.consecutive_429.saturating_sub(1) as u64) * 100;
+                jittered_interval(clamp_interval(
+                    self.base_interval_ms.saturating_add(extra),
+                    OPENING_MIN_INTERVAL_MS,
+                    2_000,
+                ))
+            }
+            AttemptOutcome::NetworkError => {
+                let extra = self.consecutive_network_errors as u64 * 300;
+                clamp_interval(self.base_interval_ms.saturating_add(extra), 500, 5_000)
+            }
+            _ => {
+                if self.in_opening_burst() {
+                    clamp_interval(self.base_interval_ms, OPENING_MIN_INTERVAL_MS, 1_000)
+                } else {
+                    clamp_interval(self.base_interval_ms.max(1_000), 1_000, 3_000)
+                }
+            }
+        }
+    }
+
+    fn reflow_delay_ms(&self, _phase: RequestPhase, outcome: AttemptOutcome) -> u64 {
+        let base = daytime_reflow_base_interval(self.base_interval_ms);
+        match outcome {
+            AttemptOutcome::Code(900001) | AttemptOutcome::Code(900002) => 1_000,
+            AttemptOutcome::Code(219) | AttemptOutcome::Code(221) => 5_000,
+            AttemptOutcome::Code(100051) => 0,
+            AttemptOutcome::Code(100009) => clamp_interval(base, 700, 5_000),
+            AttemptOutcome::Code(429) => {
+                let extra = if self.consecutive_429 <= 3 {
+                    0
+                } else {
+                    (self.consecutive_429 - 3) as u64 * 250
+                };
+                jittered_interval(clamp_interval(base.saturating_add(extra), 250, 5_000))
+            }
+            AttemptOutcome::NetworkError => {
+                let extra = self.consecutive_network_errors as u64 * 500;
+                clamp_interval(base.saturating_add(extra), 1_000, 10_000)
+            }
+            _ => base,
+        }
+    }
+
+    fn next_412_cooldown_ms(&mut self) -> u64 {
+        let now = Instant::now();
+        let cooldown = match self.last_412_at {
+            Some(last) if now.duration_since(last).as_millis() <= RECHECK_412_ESCALATE_MS => {
+                REPEATED_412_COOLDOWN_MS
+            }
+            Some(last) if now.duration_since(last).as_millis() <= RECHECK_412_RESET_MS => {
+                FIRST_412_COOLDOWN_MS
+            }
+            _ => FIRST_412_COOLDOWN_MS,
+        };
+        self.last_412_at = Some(now);
+        cooldown
+    }
+
+    fn in_opening_burst(&self) -> bool {
+        self.opening_started_at.elapsed().as_millis() <= OPENING_BURST_WINDOW_MS
+    }
+
+    fn stats_label(&self) -> String {
+        format!(
+            "策略: {}, 当前间隔: {}ms, 连续429: {}",
+            self.strategy.label(),
+            self.last_interval_ms,
+            self.consecutive_429
+        )
     }
 }
 
@@ -134,6 +411,40 @@ async fn wait_until_task_time<E: TaskEmitter>(
     }
 }
 
+async fn wait_for_prepare_gate<E: TaskEmitter>(
+    emitter: &E,
+    task_id: &str,
+    stop_flag: &AtomicBool,
+    current_offset: &AtomicI64,
+    target: Option<&chrono::DateTime<FixedOffset>>,
+) -> bool {
+    if let Some(target) = target {
+        let remaining_ms = remaining_ms_until(target, current_offset);
+        let decision = prepare_gate_decision(remaining_ms);
+        if !decision.allowed {
+            emit_log(
+                emitter,
+                task_id,
+                &format!(
+                    "Prepare gate waiting until sale time: {} ({}ms remaining)",
+                    target.format("%Y-%m-%d %H:%M:%S%.3f"),
+                    decision.remaining_ms
+                ),
+            );
+            return wait_until_task_time(
+                emitter,
+                task_id,
+                stop_flag,
+                current_offset,
+                target,
+                "Task stopped by user while waiting for prepare gate.",
+            )
+            .await;
+        }
+    }
+    true
+}
+
 pub async fn start_buy_task<E: TaskEmitter>(
     emitter: E,
     task_id: String,
@@ -146,6 +457,7 @@ pub async fn start_buy_task<E: TaskEmitter>(
     proxy: Option<String>,
     time_offset: Option<f64>,
     _ntp_server: Option<String>,
+    strategy_mode: Option<String>,
     base_dir: std::path::PathBuf,
 ) -> Result<()> {
     emit_log(&emitter, &task_id, "Starting buy task...");
@@ -185,6 +497,7 @@ pub async fn start_buy_task<E: TaskEmitter>(
     let client = client_builder.build()?;
     let current_offset = Arc::new(AtomicI64::new(time_offset.unwrap_or(0.0) as i64));
     let mut scheduled_target = None;
+    let mut scheduled_was_future = false;
 
     if let Some(ts) = &time_start {
         emit_log(&emitter, &task_id, &format!("Scheduled start time: {}", ts));
@@ -192,6 +505,7 @@ pub async fn start_buy_task<E: TaskEmitter>(
         let target_time = parse_beijing_time(ts);
 
         if let Some(target) = target_time {
+            scheduled_was_future = remaining_ms_until(&target, current_offset.as_ref()) > 0;
             let initial_offset = current_offset.load(Ordering::Relaxed);
             let offset_clone = current_offset.clone();
             let target_for_sync = target.clone();
@@ -293,6 +607,20 @@ pub async fn start_buy_task<E: TaskEmitter>(
         }
     }
 
+    let requested_strategy = StrategyMode::from_option(strategy_mode.as_deref());
+    let active_strategy = resolve_active_strategy(requested_strategy, scheduled_was_future);
+    let mut delay_controller = AdaptiveDelayController::new(active_strategy, interval);
+    emit_log(
+        &emitter,
+        &task_id,
+        &format!(
+            "Strategy mode: {} -> {} | base interval: {}ms",
+            requested_strategy.label(),
+            active_strategy.label(),
+            interval
+        ),
+    );
+
     let is_hot = info.is_hot_project.unwrap_or(false);
     let mut ctoken_gen = CTokenGenerator::new(
         std::time::SystemTime::now()
@@ -331,6 +659,18 @@ pub async fn start_buy_task<E: TaskEmitter>(
             break;
         }
 
+        if !wait_for_prepare_gate(
+            &emitter,
+            &task_id,
+            stop_flag.as_ref(),
+            current_offset.as_ref(),
+            scheduled_target.as_ref(),
+        )
+        .await
+        {
+            return Ok(());
+        }
+
         emit_log(&emitter, &task_id, "1) Preparing order...");
 
         if is_hot {
@@ -346,11 +686,35 @@ pub async fn start_buy_task<E: TaskEmitter>(
         let prepare_started_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_millis() as u64;
+        let prepare_start = Instant::now();
         let res = client
             .post(&prepare_url)
             .json(&token_payload)
             .send()
-            .await?;
+            .await;
+
+        let res = match res {
+            Ok(res) => res,
+            Err(e) => {
+                emit_log(&emitter, &task_id, &format!("Prepare request error: {}", e));
+                let delay =
+                    delay_controller.next_delay(RequestPhase::Prepare, AttemptOutcome::NetworkError);
+                emit_log(
+                    &emitter,
+                    &task_id,
+                    &format!(
+                        "{} | prepare network retry in {}ms",
+                        delay_controller.stats_label(),
+                        delay.as_millis()
+                    ),
+                );
+                if !sleep_with_stop(stop_flag.as_ref(), delay).await {
+                    emit_log(&emitter, &task_id, "Task stopped by user.");
+                    break;
+                }
+                continue;
+            }
+        };
 
         let res_json: serde_json::Value = res.json().await?;
 
@@ -376,7 +740,32 @@ pub async fn start_buy_task<E: TaskEmitter>(
                     res_json["msg"]
                 ),
             );
-            sleep(Duration::from_millis(interval)).await;
+            let delay =
+                delay_controller.next_delay(RequestPhase::Prepare, AttemptOutcome::Code(errno));
+            if errno == 412 {
+                emit_log(
+                    &emitter,
+                    &task_id,
+                    &format!("412 cooldown: {}s", delay.as_secs()),
+                );
+            }
+            emit_log(
+                &emitter,
+                &task_id,
+                &format!(
+                    "{} | next prepare in {}ms",
+                    delay_controller.stats_label(),
+                    delay.as_millis()
+                ),
+            );
+            if let Some(remaining) =
+                precise_interval_sleep_duration(prepare_start, delay.as_millis() as u64)
+            {
+                if !sleep_with_stop(stop_flag.as_ref(), remaining).await {
+                    emit_log(&emitter, &task_id, "Task stopped by user.");
+                    break;
+                }
+            }
             if mode == 1 && !before_sale {
                 left_time -= 1;
                 if left_time <= 0 {
@@ -393,34 +782,6 @@ pub async fn start_buy_task<E: TaskEmitter>(
             .as_str()
             .unwrap_or("")
             .replace('=', "");
-
-        if let Some(target) = &scheduled_target {
-            if remaining_ms_until(target, current_offset.as_ref()) > 0 {
-                emit_log(
-                    &emitter,
-                    &task_id,
-                    &format!(
-                        "Preheat complete. Waiting until sale time: {}",
-                        target.format("%Y-%m-%d %H:%M:%S%.3f")
-                    ),
-                );
-
-                if !wait_until_task_time(
-                    &emitter,
-                    &task_id,
-                    stop_flag.as_ref(),
-                    current_offset.as_ref(),
-                    target,
-                    "Task stopped by user while waiting for sale time.",
-                )
-                .await
-                {
-                    return Ok(());
-                }
-
-                emit_log(&emitter, &task_id, "Time reached! Starting execution...");
-            }
-        }
 
         emit_log(&emitter, &task_id, "2) Creating order...");
 
@@ -624,8 +985,42 @@ pub async fn start_buy_task<E: TaskEmitter>(
 
                     if errno == 100051 {
                         // Token expired
+                        let _ =
+                            delay_controller.next_delay(RequestPhase::Create, AttemptOutcome::Code(errno));
                         break;
                     }
+
+                    let delay =
+                        delay_controller.next_delay(RequestPhase::Create, AttemptOutcome::Code(errno));
+                    if errno == 412 {
+                        emit_log(
+                            &emitter,
+                            &task_id,
+                            &format!("412 cooldown: {}s", delay.as_secs()),
+                        );
+                    }
+                    if should_log_attempt || errno == 412 || delay.as_millis() >= 5_000 {
+                        emit_log(
+                            &emitter,
+                            &task_id,
+                            &format!(
+                                "{} | next create in {}ms",
+                                delay_controller.stats_label(),
+                                delay.as_millis()
+                            ),
+                        );
+                    }
+
+                    if let Some(remaining) =
+                        precise_interval_sleep_duration(start, delay.as_millis() as u64)
+                    {
+                        if !sleep_with_stop(stop_flag.as_ref(), remaining).await {
+                            emit_log(&emitter, &task_id, "Task stopped by user.");
+                            is_running = false;
+                            break;
+                        }
+                    }
+                    continue;
                 }
                 Err(e) => {
                     if should_log_attempt {
@@ -638,20 +1033,29 @@ pub async fn start_buy_task<E: TaskEmitter>(
                             ),
                         );
                     }
-                }
-            }
-
-            // Precise sleep — use tokio::sleep to avoid CPU burn
-            let elapsed = start.elapsed();
-            let interval_duration = Duration::from_millis(interval);
-            if elapsed < interval_duration {
-                let remaining = interval_duration - elapsed;
-                if remaining.as_millis() > 20 {
-                    sleep(remaining - Duration::from_millis(10)).await;
-                }
-                // Yield with a small sleep rather than spinning
-                while start.elapsed() < interval_duration {
-                    sleep(Duration::from_millis(1)).await;
+                    let delay =
+                        delay_controller.next_delay(RequestPhase::Create, AttemptOutcome::NetworkError);
+                    if should_log_attempt || delay.as_millis() >= 5_000 {
+                        emit_log(
+                            &emitter,
+                            &task_id,
+                            &format!(
+                                "{} | next create in {}ms",
+                                delay_controller.stats_label(),
+                                delay.as_millis()
+                            ),
+                        );
+                    }
+                    if let Some(remaining) =
+                        precise_interval_sleep_duration(start, delay.as_millis() as u64)
+                    {
+                        if !sleep_with_stop(stop_flag.as_ref(), remaining).await {
+                            emit_log(&emitter, &task_id, "Task stopped by user.");
+                            is_running = false;
+                            break;
+                        }
+                    }
+                    continue;
                 }
             }
         }
@@ -682,6 +1086,7 @@ pub async fn start_buy_task<E: TaskEmitter>(
 mod tests {
     use super::*;
     use chrono::Timelike;
+    use std::time::Duration;
 
     #[test]
     fn parses_scheduled_time_as_beijing_time() {
@@ -711,5 +1116,91 @@ mod tests {
         assert_eq!(parsed.hour(), 7);
         assert_eq!(parsed.minute(), 10);
         assert_eq!(parsed.second(), 0);
+    }
+
+    #[test]
+    fn prepare_gate_blocks_before_sale_time() {
+        let decision = prepare_gate_decision(1);
+
+        assert!(!decision.allowed);
+        assert_eq!(decision.remaining_ms, 1);
+    }
+
+    #[test]
+    fn prepare_gate_allows_at_sale_time() {
+        let decision = prepare_gate_decision(0);
+
+        assert!(decision.allowed);
+        assert_eq!(decision.remaining_ms, 0);
+    }
+
+    #[test]
+    fn token_expiry_uses_immediate_retry_to_reprepare() {
+        let mut controller = AdaptiveDelayController::new(ActiveStrategy::Opening, 500);
+
+        assert_eq!(
+            controller.next_delay_ms(RequestPhase::Create, AttemptOutcome::Code(100051)),
+            0
+        );
+    }
+
+    #[test]
+    fn first_412_cools_down_for_one_minute() {
+        let mut controller = AdaptiveDelayController::new(ActiveStrategy::Reflow, 500);
+
+        assert_eq!(
+            controller.next_delay_ms(RequestPhase::Create, AttemptOutcome::Code(412)),
+            FIRST_412_COOLDOWN_MS
+        );
+    }
+
+    #[test]
+    fn repeated_412_within_ten_minutes_cools_down_for_five_minutes() {
+        let mut controller = AdaptiveDelayController::new(ActiveStrategy::Reflow, 500);
+        controller.last_412_at = Some(Instant::now() - Duration::from_secs(9 * 60));
+
+        assert_eq!(
+            controller.next_delay_ms(RequestPhase::Create, AttemptOutcome::Code(412)),
+            REPEATED_412_COOLDOWN_MS
+        );
+    }
+
+    #[test]
+    fn old_412_resets_to_one_minute_cooldown() {
+        let mut controller = AdaptiveDelayController::new(ActiveStrategy::Reflow, 500);
+        controller.last_412_at = Some(Instant::now() - Duration::from_secs(31 * 60));
+
+        assert_eq!(
+            controller.next_delay_ms(RequestPhase::Create, AttemptOutcome::Code(412)),
+            FIRST_412_COOLDOWN_MS
+        );
+    }
+
+    #[test]
+    fn busy_code_waits_at_least_one_second() {
+        let mut controller = AdaptiveDelayController::new(ActiveStrategy::Opening, 250);
+
+        assert!(
+            controller.next_delay_ms(RequestPhase::Create, AttemptOutcome::Code(900001)) >= 1_000
+        );
+        assert!(
+            controller.next_delay_ms(RequestPhase::Create, AttemptOutcome::Code(900002)) >= 1_000
+        );
+    }
+
+    #[test]
+    fn auto_strategy_uses_opening_when_schedule_was_future() {
+        assert_eq!(
+            resolve_active_strategy(StrategyMode::Auto, true),
+            ActiveStrategy::Opening
+        );
+    }
+
+    #[test]
+    fn auto_strategy_uses_reflow_without_future_schedule() {
+        assert_eq!(
+            resolve_active_strategy(StrategyMode::Auto, false),
+            ActiveStrategy::Reflow
+        );
     }
 }

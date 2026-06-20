@@ -323,6 +323,7 @@ async fn start_buy(state: Arc<AppState>, args: Value) -> Result<String, String> 
             arg_opt_string(&args, "proxy"),
             args.get("timeOffset").and_then(|v| v.as_f64()),
             arg_opt_string(&args, "ntpServer"),
+            arg_opt_string(&args, "strategyMode"),
             base_dir,
         )
         .await
