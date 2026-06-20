@@ -10,6 +10,7 @@ const DEFAULT_VISIBLE_LOG_LINES = 100;
 const LOG_BUFFER_LIMIT = 1000;
 const SYNC_TIME_TIMEOUT_MS = 18000;
 const DEFAULT_TIME_SERVER = "ntp.aliyun.com";
+const DEFAULT_SALE_START_DELAY_MS = 200;
 
 const appendLogLine = (lines, line) => [...lines, line].slice(-LOG_BUFFER_LIMIT);
 const logTime = (log) => typeof log === "string" ? "" : log.time;
@@ -224,6 +225,7 @@ function App() {
     const [requestInterval, setRequestInterval] = useState(1000);
     const [mode, setMode] = useState(0); // 0: infinite, 1: finite
     const [totalAttempts, setTotalAttempts] = useState(10);
+    const [saleStartDelayMs, setSaleStartDelayMsState] = useState(DEFAULT_SALE_START_DELAY_MS);
 
     // Advanced Settings
     const [timeOffset, setTimeOffsetState] = useState(0);
@@ -297,6 +299,12 @@ function App() {
         const numeric = Number(value);
         const safeValue = Number.isFinite(numeric) ? numeric : 0;
         setTimeOffsetState(safeValue);
+    };
+
+    const updateSaleStartDelayMs = (value) => {
+        const numeric = Number(value);
+        const safeValue = Number.isFinite(numeric) ? Math.max(0, Math.round(numeric)) : DEFAULT_SALE_START_DELAY_MS;
+        setSaleStartDelayMsState(safeValue);
     };
 
     const getSyncedServerDate = () => {
@@ -509,6 +517,9 @@ function App() {
         }
         if (hasOwn(settings, "timeOffset")) {
             updateTimeOffset(settings.timeOffset);
+        }
+        if (hasOwn(settings, "saleStartDelayMs")) {
+            updateSaleStartDelayMs(settings.saleStartDelayMs);
         }
         return true;
     }
@@ -854,7 +865,8 @@ function App() {
             mode,
             totalAttempts,
             proxy,
-            timeOffset
+            timeOffset,
+            saleStartDelayMs
         };
         const blob = new Blob([JSON.stringify(config, null, 2)], { type: "application/json" });
         const url = URL.createObjectURL(blob);
@@ -898,6 +910,7 @@ function App() {
                 if (config.totalAttempts) setTotalAttempts(config.totalAttempts);
                 if (config.proxy) setProxy(config.proxy);
                 if (typeof config.timeOffset !== "undefined") updateTimeOffset(config.timeOffset);
+                if (typeof config.saleStartDelayMs !== "undefined") updateSaleStartDelayMs(config.saleStartDelayMs);
                 if (config.buyerAddresses) {
                     const normalizedMap = Object.fromEntries(
                         Object.entries(config.buyerAddresses).map(([key, addr]) => [key, normalizeAddress(addr)])
@@ -1245,6 +1258,7 @@ function App() {
             timeStart,
             proxy,
             timeOffset: parseFloat(timeOffset),
+            saleStartDelayMs,
             buyers: sanitizedBuyers,
             ntpServer: DEFAULT_TIME_SERVER
         };
@@ -1580,7 +1594,8 @@ function App() {
             proxy,
             notifications,
             timeOffset,
-            syncInterval
+            syncInterval,
+            saleStartDelayMs
         };
         try {
             await invoke("save_settings", { settings });
@@ -2748,6 +2763,18 @@ function App() {
                                                 </button>
                                             </div>
                                             <p className="text-xs text-gray-500 mt-2">采样质量: {formatSyncQuality(syncQuality)}</p>
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium text-gray-400 mb-2">开售执行延迟 (ms)</label>
+                                            <input
+                                                type="number"
+                                                min="0"
+                                                step="1"
+                                                className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:border-blue-500 focus:outline-none"
+                                                value={saleStartDelayMs}
+                                                onChange={(e) => updateSaleStartDelayMs(e.target.value)}
+                                            />
+                                            <p className="text-xs text-gray-500 mt-2">仅在最后执行等待阶段追加，默认 200ms，不影响预热、刷新、重试、校时和时钟显示</p>
                                         </div>
                                     </div>
                                 </div>
