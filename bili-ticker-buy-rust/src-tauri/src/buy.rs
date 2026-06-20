@@ -118,6 +118,25 @@ fn sale_execution_target(
     scheduled_target.clone() + chrono::Duration::milliseconds(delay_ms)
 }
 
+#[derive(Debug, Clone)]
+struct SalePhaseTargets {
+    scheduled: chrono::DateTime<FixedOffset>,
+    execution: chrono::DateTime<FixedOffset>,
+}
+
+fn sale_phase_targets(
+    scheduled_target: &chrono::DateTime<FixedOffset>,
+    delay_ms: i64,
+) -> SalePhaseTargets {
+    let scheduled = scheduled_target.clone();
+    let execution = sale_execution_target(&scheduled, delay_ms);
+
+    SalePhaseTargets {
+        scheduled,
+        execution,
+    }
+}
+
 async fn wait_until_task_time<E: TaskEmitter>(
     emitter: &E,
     task_id: &str,
@@ -211,9 +230,10 @@ pub async fn start_buy_task<E: TaskEmitter>(
         let target_time = parse_beijing_time(ts);
 
         if let Some(target) = target_time {
+            let sale_targets = sale_phase_targets(&target, sale_start_delay_ms);
             let initial_offset = current_offset.load(Ordering::Relaxed);
             let offset_clone = current_offset.clone();
-            let target_for_sync = target.clone();
+            let target_for_sync = sale_targets.scheduled.clone();
             let stop_flag_clone = stop_flag.clone();
             let task_id_clone = task_id.clone();
             let emitter_clone = emitter.clone();
@@ -281,7 +301,7 @@ pub async fn start_buy_task<E: TaskEmitter>(
                 &task_id,
                 &format!(
                     "Waiting until sale time: {} (Initial Offset: {}ms)",
-                    target.format("%Y-%m-%d %H:%M:%S%.3f"),
+                    sale_targets.scheduled.format("%Y-%m-%d %H:%M:%S%.3f"),
                     initial_offset
                 ),
             );
@@ -291,7 +311,7 @@ pub async fn start_buy_task<E: TaskEmitter>(
                 &task_id,
                 stop_flag.as_ref(),
                 current_offset.as_ref(),
-                &target,
+                &sale_targets.scheduled,
                 "Task stopped by user while waiting for sale time.",
             )
             .await
@@ -300,10 +320,8 @@ pub async fn start_buy_task<E: TaskEmitter>(
             }
 
             emit_log(&emitter, &task_id, "Sale time reached! Preparing order...");
-            scheduled_target = Some(target);
-            execution_target = scheduled_target
-                .as_ref()
-                .map(|scheduled| sale_execution_target(scheduled, sale_start_delay_ms));
+            scheduled_target = Some(sale_targets.scheduled);
+            execution_target = Some(sale_targets.execution);
         } else {
             let message = format!(
                 "Invalid scheduled start time format: {}. Expected YYYY-MM-DD HH:mm or YYYY-MM-DD HH:mm:ss.",
@@ -443,7 +461,11 @@ pub async fn start_buy_task<E: TaskEmitter>(
                     return Ok(());
                 }
 
-                emit_log(&emitter, &task_id, "Execution time reached! Starting execution...");
+                emit_log(
+                    &emitter,
+                    &task_id,
+                    "Execution time reached! Starting execution...",
+                );
             }
         }
 
@@ -740,7 +762,10 @@ mod tests {
 
     #[test]
     fn sale_start_delay_defaults_to_200ms() {
-        assert_eq!(sanitize_sale_start_delay_ms(None), DEFAULT_SALE_START_DELAY_MS);
+        assert_eq!(
+            sanitize_sale_start_delay_ms(None),
+            DEFAULT_SALE_START_DELAY_MS
+        );
     }
 
     #[test]
@@ -754,5 +779,31 @@ mod tests {
         let execution = sale_execution_target(&scheduled, 200);
 
         assert_eq!((execution - scheduled).num_milliseconds(), 200);
+    }
+
+    #[test]
+    fn sale_phase_targets_preserve_original_schedule_for_preheat() {
+        let scheduled = parse_beijing_time("2026-06-19 12:34:56").unwrap();
+        let original_schedule = scheduled.clone();
+
+        let targets = sale_phase_targets(&scheduled, 350);
+
+        assert_eq!(scheduled, original_schedule);
+        assert_eq!(targets.scheduled, original_schedule);
+        assert_eq!(
+            (targets.execution - targets.scheduled).num_milliseconds(),
+            350
+        );
+    }
+
+    #[test]
+    fn sale_phase_targets_keep_execution_on_schedule_when_delay_clamps_to_zero() {
+        let scheduled = parse_beijing_time("2026-06-19 12:34:56").unwrap();
+        let delay_ms = sanitize_sale_start_delay_ms(Some(-25));
+
+        let targets = sale_phase_targets(&scheduled, delay_ms);
+
+        assert_eq!(targets.scheduled, scheduled);
+        assert_eq!(targets.execution, scheduled);
     }
 }
