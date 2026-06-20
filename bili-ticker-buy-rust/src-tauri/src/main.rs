@@ -10,7 +10,7 @@ mod config;
 mod storage;
 mod util;
 
-use buy::TicketInfo;
+use buy::{BuyTaskOutcome, TicketInfo};
 use reqwest::Client;
 use std::collections::HashMap;
 use std::fs;
@@ -386,23 +386,56 @@ async fn start_buy(
     let task_id_clone = task_id.clone();
     let tasks_clone = state.tasks.clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = buy::start_buy_task(
-            TauriTaskEmitter { window },
-            task_id_clone.clone(),
-            stop_flag,
-            info,
-            interval,
-            mode,
-            total_attempts,
-            time_start,
-            proxy,
-            time_offset,
-            ntp_server,
-            app_dir,
-        )
-        .await
-        {
-            println!("Buy task error: {}", e);
+        let emitter = TauriTaskEmitter { window };
+        let mut stop_flag = stop_flag;
+        let mut allow_pre_sale_restart = true;
+
+        loop {
+            let outcome = buy::start_buy_task(
+                emitter.clone(),
+                task_id_clone.clone(),
+                stop_flag.clone(),
+                info.clone(),
+                interval,
+                mode,
+                total_attempts,
+                time_start.clone(),
+                proxy.clone(),
+                time_offset,
+                ntp_server.clone(),
+                allow_pre_sale_restart,
+                app_dir.clone(),
+            )
+            .await;
+
+            match outcome {
+                Ok(BuyTaskOutcome::RestartBeforeSale) if allow_pre_sale_restart => {
+                    allow_pre_sale_restart = false;
+                    let next_stop_flag = Arc::new(AtomicBool::new(false));
+                    let should_restart = {
+                        let mut tasks = tasks_clone.lock().unwrap();
+                        let was_stopped = tasks
+                            .get(&task_id_clone)
+                            .map(|flag| flag.load(Ordering::Relaxed))
+                            .unwrap_or_else(|| stop_flag.load(Ordering::Relaxed));
+                        if !was_stopped {
+                            tasks.insert(task_id_clone.clone(), next_stop_flag.clone());
+                        }
+                        !was_stopped
+                    };
+
+                    if should_restart {
+                        stop_flag = next_stop_flag;
+                        continue;
+                    }
+                }
+                Ok(BuyTaskOutcome::RestartBeforeSale) | Ok(BuyTaskOutcome::Finished) => {}
+                Err(e) => {
+                    println!("Buy task error: {}", e);
+                }
+            }
+
+            break;
         }
         // Clean up the task from AppState to prevent memory leak
         tasks_clone.lock().unwrap().remove(&task_id_clone);

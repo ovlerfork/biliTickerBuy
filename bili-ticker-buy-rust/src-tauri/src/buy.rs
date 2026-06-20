@@ -16,6 +16,13 @@ use tokio::time::sleep;
 const BEIJING_OFFSET_SECONDS: i32 = 8 * 60 * 60;
 const TIME_SYNC_FREEZE_BEFORE_START_MS: i64 = 2000;
 const TIME_SYNC_OFFSET_JUMP_WARN_MS: i64 = 300;
+const PRE_SALE_RESTART_BEFORE_START_MS: i64 = 60_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuyTaskOutcome {
+    Finished,
+    RestartBeforeSale,
+}
 
 /// Error code dictionary from the original Python project
 /// Maps error codes to human-readable messages
@@ -102,6 +109,14 @@ fn remaining_ms_until(target: &chrono::DateTime<FixedOffset>, current_offset: &A
     (target_with_offset - beijing_now()).num_milliseconds()
 }
 
+fn should_restart_before_sale(remaining_ms: i64) -> bool {
+    remaining_ms > PRE_SALE_RESTART_BEFORE_START_MS
+}
+
+fn pre_sale_restart_time(target: &chrono::DateTime<FixedOffset>) -> chrono::DateTime<FixedOffset> {
+    target.clone() - chrono::Duration::milliseconds(PRE_SALE_RESTART_BEFORE_START_MS)
+}
+
 async fn wait_until_task_time<E: TaskEmitter>(
     emitter: &E,
     task_id: &str,
@@ -146,8 +161,9 @@ pub async fn start_buy_task<E: TaskEmitter>(
     proxy: Option<String>,
     time_offset: Option<f64>,
     _ntp_server: Option<String>,
+    allow_pre_sale_restart: bool,
     base_dir: std::path::PathBuf,
-) -> Result<()> {
+) -> Result<BuyTaskOutcome> {
     emit_log(&emitter, &task_id, "Starting buy task...");
 
     if let Some(p) = &proxy {
@@ -277,7 +293,43 @@ pub async fn start_buy_task<E: TaskEmitter>(
             )
             .await
             {
-                return Ok(());
+                return Ok(BuyTaskOutcome::Finished);
+            }
+
+            if allow_pre_sale_restart
+                && should_restart_before_sale(remaining_ms_until(&target, current_offset.as_ref()))
+            {
+                let restart_time = pre_sale_restart_time(&target);
+                emit_log(
+                    &emitter,
+                    &task_id,
+                    &format!(
+                        "Waiting until cookie refresh time: {}",
+                        restart_time.format("%Y-%m-%d %H:%M:%S%.3f")
+                    ),
+                );
+
+                if !wait_until_task_time(
+                    &emitter,
+                    &task_id,
+                    stop_flag.as_ref(),
+                    current_offset.as_ref(),
+                    &restart_time,
+                    "Task stopped by user while waiting for cookie refresh time.",
+                )
+                .await
+                {
+                    return Ok(BuyTaskOutcome::Finished);
+                }
+
+                if remaining_ms_until(&target, current_offset.as_ref()) > 0 {
+                    emit_log(
+                        &emitter,
+                        &task_id,
+                        "Restarting task one minute before sale to refresh cookies.",
+                    );
+                    return Ok(BuyTaskOutcome::RestartBeforeSale);
+                }
             }
 
             emit_log(&emitter, &task_id, "Sale time reached! Preparing order...");
@@ -289,7 +341,7 @@ pub async fn start_buy_task<E: TaskEmitter>(
             );
             emit_log(&emitter, &task_id, &message);
             emit_task_result(&emitter, &task_id, false, &message);
-            return Ok(());
+            return Ok(BuyTaskOutcome::Finished);
         }
     }
 
@@ -415,7 +467,7 @@ pub async fn start_buy_task<E: TaskEmitter>(
                 )
                 .await
                 {
-                    return Ok(());
+                    return Ok(BuyTaskOutcome::Finished);
                 }
 
                 emit_log(&emitter, &task_id, "Time reached! Starting execution...");
@@ -675,7 +727,7 @@ pub async fn start_buy_task<E: TaskEmitter>(
         }
     }
 
-    Ok(())
+    Ok(BuyTaskOutcome::Finished)
 }
 
 #[cfg(test)]
@@ -711,5 +763,36 @@ mod tests {
         assert_eq!(parsed.hour(), 7);
         assert_eq!(parsed.minute(), 10);
         assert_eq!(parsed.second(), 0);
+    }
+
+    #[test]
+    fn requires_pre_sale_restart_before_final_minute() {
+        assert!(should_restart_before_sale(
+            PRE_SALE_RESTART_BEFORE_START_MS + 1
+        ));
+    }
+
+    #[test]
+    fn skips_pre_sale_restart_inside_final_minute() {
+        assert!(!should_restart_before_sale(
+            PRE_SALE_RESTART_BEFORE_START_MS
+        ));
+        assert!(!should_restart_before_sale(1));
+        assert!(!should_restart_before_sale(0));
+        assert!(!should_restart_before_sale(-1));
+    }
+
+    #[test]
+    fn pre_sale_restart_time_is_one_minute_before_sale() {
+        let target = parse_beijing_time("2026-06-19 12:34:56").unwrap();
+        let restart_at = pre_sale_restart_time(&target);
+
+        assert_eq!(
+            (target - restart_at).num_milliseconds(),
+            PRE_SALE_RESTART_BEFORE_START_MS
+        );
+        assert_eq!(restart_at.hour(), 12);
+        assert_eq!(restart_at.minute(), 33);
+        assert_eq!(restart_at.second(), 56);
     }
 }
