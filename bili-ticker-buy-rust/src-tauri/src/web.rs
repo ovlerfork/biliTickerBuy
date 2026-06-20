@@ -316,6 +316,7 @@ async fn start_buy(state: Arc<AppState>, args: Value) -> Result<String, String> 
     let proxy = arg_opt_string(&args, "proxy");
     let time_offset = args.get("timeOffset").and_then(|v| v.as_f64());
     let ntp_server = arg_opt_string(&args, "ntpServer");
+    let strategy_mode = arg_opt_string(&args, "strategyMode");
 
     tokio::spawn(async move {
         let mut stop_flag = stop_flag;
@@ -334,6 +335,7 @@ async fn start_buy(state: Arc<AppState>, args: Value) -> Result<String, String> 
                 proxy.clone(),
                 time_offset,
                 ntp_server.clone(),
+                strategy_mode.clone(),
                 allow_pre_sale_restart,
                 base_dir.clone(),
             )
