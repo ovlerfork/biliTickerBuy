@@ -322,6 +322,7 @@ async fn start_buy(state: Arc<AppState>, args: Value) -> Result<String, String> 
             time_start,
             arg_opt_string(&args, "proxy"),
             args.get("timeOffset").and_then(|v| v.as_f64()),
+            arg_i64(&args, "saleStartDelayMs").ok(),
             arg_opt_string(&args, "ntpServer"),
             base_dir,
         )
@@ -360,6 +361,12 @@ fn arg_u64(args: &Value, key: &str) -> Result<u64, String> {
 
 fn arg_u32(args: &Value, key: &str) -> Result<u32, String> {
     arg_u64(args, key).map(|v| v as u32)
+}
+
+fn arg_i64(args: &Value, key: &str) -> Result<i64, String> {
+    args.get(key)
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| format!("missing i64 arg: {key}"))
 }
 
 fn to_value<T: Serialize>(result: anyhow::Result<T>) -> Result<Value, String> {

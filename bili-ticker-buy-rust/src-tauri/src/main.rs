@@ -319,6 +319,7 @@ async fn start_buy(
     time_start: Option<String>,
     proxy: Option<String>,
     time_offset: Option<f64>,
+    sale_start_delay_ms: Option<i64>,
     buyers: Option<Vec<serde_json::Value>>,
     ntp_server: Option<String>,
 ) -> Result<String, String> {
@@ -397,6 +398,7 @@ async fn start_buy(
             time_start,
             proxy,
             time_offset,
+            sale_start_delay_ms,
             ntp_server,
             app_dir,
         )

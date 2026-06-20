@@ -16,6 +16,7 @@ use tokio::time::sleep;
 const BEIJING_OFFSET_SECONDS: i32 = 8 * 60 * 60;
 const TIME_SYNC_FREEZE_BEFORE_START_MS: i64 = 2000;
 const TIME_SYNC_OFFSET_JUMP_WARN_MS: i64 = 300;
+const DEFAULT_SALE_START_DELAY_MS: i64 = 200;
 
 /// Error code dictionary from the original Python project
 /// Maps error codes to human-readable messages
@@ -102,6 +103,21 @@ fn remaining_ms_until(target: &chrono::DateTime<FixedOffset>, current_offset: &A
     (target_with_offset - beijing_now()).num_milliseconds()
 }
 
+fn sanitize_sale_start_delay_ms(delay_ms: Option<i64>) -> i64 {
+    match delay_ms {
+        Some(delay) if delay < 0 => 0,
+        Some(delay) => delay,
+        None => DEFAULT_SALE_START_DELAY_MS,
+    }
+}
+
+fn sale_execution_target(
+    scheduled_target: &chrono::DateTime<FixedOffset>,
+    delay_ms: i64,
+) -> chrono::DateTime<FixedOffset> {
+    scheduled_target.clone() + chrono::Duration::milliseconds(delay_ms)
+}
+
 async fn wait_until_task_time<E: TaskEmitter>(
     emitter: &E,
     task_id: &str,
@@ -145,6 +161,7 @@ pub async fn start_buy_task<E: TaskEmitter>(
     time_start: Option<String>,
     proxy: Option<String>,
     time_offset: Option<f64>,
+    sale_start_delay_ms: Option<i64>,
     _ntp_server: Option<String>,
     base_dir: std::path::PathBuf,
 ) -> Result<()> {
@@ -184,7 +201,9 @@ pub async fn start_buy_task<E: TaskEmitter>(
 
     let client = client_builder.build()?;
     let current_offset = Arc::new(AtomicI64::new(time_offset.unwrap_or(0.0) as i64));
+    let sale_start_delay_ms = sanitize_sale_start_delay_ms(sale_start_delay_ms);
     let mut scheduled_target = None;
+    let mut execution_target = None;
 
     if let Some(ts) = &time_start {
         emit_log(&emitter, &task_id, &format!("Scheduled start time: {}", ts));
@@ -282,6 +301,9 @@ pub async fn start_buy_task<E: TaskEmitter>(
 
             emit_log(&emitter, &task_id, "Sale time reached! Preparing order...");
             scheduled_target = Some(target);
+            execution_target = scheduled_target
+                .as_ref()
+                .map(|scheduled| sale_execution_target(scheduled, sale_start_delay_ms));
         } else {
             let message = format!(
                 "Invalid scheduled start time format: {}. Expected YYYY-MM-DD HH:mm or YYYY-MM-DD HH:mm:ss.",
@@ -363,7 +385,10 @@ pub async fn start_buy_task<E: TaskEmitter>(
                 .unwrap_or(-1);
             let before_sale = scheduled_target
                 .as_ref()
-                .map(|target| remaining_ms_until(target, current_offset.as_ref()) > 0)
+                .map(|target| {
+                    let gate_target = execution_target.as_ref().unwrap_or(target);
+                    remaining_ms_until(gate_target, current_offset.as_ref()) > 0
+                })
                 .unwrap_or(false);
 
             emit_log(
@@ -394,13 +419,13 @@ pub async fn start_buy_task<E: TaskEmitter>(
             .unwrap_or("")
             .replace('=', "");
 
-        if let Some(target) = &scheduled_target {
+        if let Some(target) = execution_target.as_ref().or(scheduled_target.as_ref()) {
             if remaining_ms_until(target, current_offset.as_ref()) > 0 {
                 emit_log(
                     &emitter,
                     &task_id,
                     &format!(
-                        "Preheat complete. Waiting until sale time: {}",
+                        "Preheat complete. Waiting until execution time: {}",
                         target.format("%Y-%m-%d %H:%M:%S%.3f")
                     ),
                 );
@@ -418,7 +443,7 @@ pub async fn start_buy_task<E: TaskEmitter>(
                     return Ok(());
                 }
 
-                emit_log(&emitter, &task_id, "Time reached! Starting execution...");
+                emit_log(&emitter, &task_id, "Execution time reached! Starting execution...");
             }
         }
 
@@ -711,5 +736,23 @@ mod tests {
         assert_eq!(parsed.hour(), 7);
         assert_eq!(parsed.minute(), 10);
         assert_eq!(parsed.second(), 0);
+    }
+
+    #[test]
+    fn sale_start_delay_defaults_to_200ms() {
+        assert_eq!(sanitize_sale_start_delay_ms(None), DEFAULT_SALE_START_DELAY_MS);
+    }
+
+    #[test]
+    fn negative_sale_start_delay_is_clamped_to_zero() {
+        assert_eq!(sanitize_sale_start_delay_ms(Some(-25)), 0);
+    }
+
+    #[test]
+    fn execution_target_adds_delay_to_scheduled_target() {
+        let scheduled = parse_beijing_time("2026-06-19 12:34:56").unwrap();
+        let execution = sale_execution_target(&scheduled, 200);
+
+        assert_eq!((execution - scheduled).num_milliseconds(), 200);
     }
 }
