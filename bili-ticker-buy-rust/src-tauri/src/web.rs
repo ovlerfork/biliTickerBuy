@@ -9,7 +9,7 @@ mod storage;
 #[path = "util.rs"]
 mod util;
 
-use buy::{TaskEmitter, TicketInfo};
+use buy::{BuyTaskOutcome, TaskEmitter, TicketInfo};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -310,24 +310,63 @@ async fn start_buy(state: Arc<AppState>, args: Value) -> Result<String, String> 
     let tasks = state.tasks.clone();
     let task_id_clone = task_id.clone();
     let base_dir = state.base_dir.clone();
+    let interval = arg_u64(&args, "interval").unwrap_or(1000);
+    let mode = arg_u32(&args, "mode").unwrap_or(0);
+    let total_attempts = arg_u32(&args, "totalAttempts").unwrap_or(10);
+    let proxy = arg_opt_string(&args, "proxy");
+    let time_offset = args.get("timeOffset").and_then(|v| v.as_f64());
+    let ntp_server = arg_opt_string(&args, "ntpServer");
+
     tokio::spawn(async move {
-        if let Err(e) = buy::start_buy_task(
-            emitter,
-            task_id_clone.clone(),
-            stop_flag,
-            info,
-            arg_u64(&args, "interval").unwrap_or(1000),
-            arg_u32(&args, "mode").unwrap_or(0),
-            arg_u32(&args, "totalAttempts").unwrap_or(10),
-            time_start,
-            arg_opt_string(&args, "proxy"),
-            args.get("timeOffset").and_then(|v| v.as_f64()),
-            arg_opt_string(&args, "ntpServer"),
-            base_dir,
-        )
-        .await
-        {
-            eprintln!("Buy task error: {e}");
+        let mut stop_flag = stop_flag;
+        let mut allow_pre_sale_restart = true;
+
+        loop {
+            let outcome = buy::start_buy_task(
+                emitter.clone(),
+                task_id_clone.clone(),
+                stop_flag.clone(),
+                info.clone(),
+                interval,
+                mode,
+                total_attempts,
+                time_start.clone(),
+                proxy.clone(),
+                time_offset,
+                ntp_server.clone(),
+                allow_pre_sale_restart,
+                base_dir.clone(),
+            )
+            .await;
+
+            match outcome {
+                Ok(BuyTaskOutcome::RestartBeforeSale) if allow_pre_sale_restart => {
+                    allow_pre_sale_restart = false;
+                    let next_stop_flag = Arc::new(AtomicBool::new(false));
+                    let should_restart = {
+                        let mut task_flags = tasks.lock().unwrap();
+                        let was_stopped = task_flags
+                            .get(&task_id_clone)
+                            .map(|flag| flag.load(Ordering::Relaxed))
+                            .unwrap_or_else(|| stop_flag.load(Ordering::Relaxed));
+                        if !was_stopped {
+                            task_flags.insert(task_id_clone.clone(), next_stop_flag.clone());
+                        }
+                        !was_stopped
+                    };
+
+                    if should_restart {
+                        stop_flag = next_stop_flag;
+                        continue;
+                    }
+                }
+                Ok(BuyTaskOutcome::RestartBeforeSale) | Ok(BuyTaskOutcome::Finished) => {}
+                Err(e) => {
+                    eprintln!("Buy task error: {e}");
+                }
+            }
+
+            break;
         }
         tasks.lock().unwrap().remove(&task_id_clone);
     });
