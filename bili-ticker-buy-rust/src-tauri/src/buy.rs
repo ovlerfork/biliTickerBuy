@@ -273,11 +273,13 @@ pub async fn start_buy_task<E: TaskEmitter>(
                     }
                 }
             });
+            let preheat_time = target.clone() - chrono::Duration::minutes(3);
             emit_log(
                 &emitter,
                 &task_id,
                 &format!(
-                    "Waiting until sale time: {} (Initial Offset: {}ms)",
+                    "Waiting until preheat: {} (Sale time: {}, Initial Offset: {}ms)",
+                    preheat_time.format("%Y-%m-%d %H:%M:%S%.3f"),
                     target.format("%Y-%m-%d %H:%M:%S%.3f"),
                     initial_offset
                 ),
@@ -288,8 +290,8 @@ pub async fn start_buy_task<E: TaskEmitter>(
                 &task_id,
                 stop_flag.as_ref(),
                 current_offset.as_ref(),
-                &target,
-                "Task stopped by user while waiting for sale time.",
+                &preheat_time,
+                "Task stopped by user while waiting for preheat.",
             )
             .await
             {
@@ -332,7 +334,7 @@ pub async fn start_buy_task<E: TaskEmitter>(
                 }
             }
 
-            emit_log(&emitter, &task_id, "Sale time reached! Preparing order...");
+            emit_log(&emitter, &task_id, "Preheat time reached! Preparing order...");
             scheduled_target = Some(target);
         } else {
             let message = format!(
@@ -428,8 +430,13 @@ pub async fn start_buy_task<E: TaskEmitter>(
                     res_json["msg"]
                 ),
             );
+            if before_sale {
+                emit_task_result(&emitter, &task_id, false, "预热获取 key 失败，任务停止");
+                return Ok(());
+            }
+
             sleep(Duration::from_millis(interval)).await;
-            if mode == 1 && !before_sale {
+            if mode == 1 {
                 left_time -= 1;
                 if left_time <= 0 {
                     is_running = false;
